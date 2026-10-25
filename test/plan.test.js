@@ -247,6 +247,26 @@ test('reconcileWithAcademicYear dopasowuje istniejące serie i przedmioty obsłu
     specialDays: [{ date: '2026-10-14', type: 'rector', label: 'Błąd', start: '14:00', end: '10:00' }],
   };
   assert.throws(() => validatePlan(badRector));
+
+  // Sesja egzaminacyjna: odwołuje zwykłe zajęcia cykliczne, ale pozwala zapisać egzaminy / poprawki (również w weekend sesji)
+  const sessionYear = {
+    specialDays: [
+      { date: '2026-10-21', type: 'session', label: 'Sesja zimowa' },
+      { date: '2026-10-24', type: 'session', label: 'Sesja zimowa (sobota)' },
+    ],
+  };
+  assert.deepEqual(
+    datesFor('2026-10-14', '2026-10-28', 'weekly', '', sessionYear, true, false),
+    ['2026-10-14', '2026-10-28'],
+  );
+  assert.deepEqual(
+    datesFor('2026-10-21', '', 'once', '', sessionYear, true, false),
+    ['2026-10-21'],
+  );
+  assert.deepEqual(
+    datesFor('2026-10-24', '', 'once', '', sessionYear, true, false),
+    ['2026-10-24'],
+  );
 });
 
 // --- API -----------------------------------------------------------------------

@@ -38,6 +38,11 @@ let editingId = null;        // id edytowanych zajęć (null = nowe)
 let detailsEventId = null;   // id zajęć aktualnie wyświetlanych w oknie szczegółów
 let week = monday(today());  // poniedziałek wyświetlanego tygodnia
 let selectedDayIndex = weekdayIndex(today()); // 0..6 — aktywny dzień w widoku mobilnym (jak w USOS)
+let mobileSlideDir = '';     // 'slide-next' | 'slide-prev' | '' — kierunek animacji przełączania dnia na telefonie
+let currentGridBounds = { startMin: 8 * 60, endMin: 16 * 60 };
+let lastRenderedToday = today();
+let lockedScrollY = 0;
+let isScrollLocked = false;
 
 // --- Narzędzia ---------------------------------------------------------------
 
@@ -50,6 +55,41 @@ function today() {
   const now = new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 10);
+}
+
+function nowMinutesFloat() {
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
+}
+
+function nowTimeLabel() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, '0');
+  const m = String(now.getMinutes()).padStart(2, '0');
+  return `${h}:${m}`;
+}
+
+/** Blokuje przewijanie tła strony, gdy jakiekolwiek okno modalne (<dialog>) jest otwarte. */
+function syncModalScrollLock() {
+  const anyDialogOpen = Boolean(document.querySelector('dialog[open]'));
+  if (anyDialogOpen && !isScrollLocked) {
+    lockedScrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    isScrollLocked = true;
+    document.documentElement.classList.add('modal-open');
+    document.body.classList.add('modal-open');
+    document.body.style.top = `-${lockedScrollY}px`;
+  } else if (!anyDialogOpen && isScrollLocked) {
+    isScrollLocked = false;
+    document.documentElement.classList.remove('modal-open');
+    document.body.classList.remove('modal-open');
+    document.body.style.top = '';
+    window.scrollTo(0, lockedScrollY);
+  }
+}
+
+function showDialogModal(dialogEl) {
+  dialogEl.showModal();
+  syncModalScrollLock();
 }
 
 const uid = () => crypto.randomUUID();
@@ -101,9 +141,11 @@ function setEditMode(enabled) {
     : '<i class="ph ph-pencil-simple"></i> <span class="btn-label">Tryb edycji: Wył.</span>';
 
   $('addEvent').hidden = !editMode;
+  $('academicYearBtn').hidden = !editMode;
+  $('bulkManageBtn').hidden = !editMode;
   $('calendarHint').textContent = editMode
     ? 'Tryb edycji aktywny: kliknij nagłówek dnia lub pusty dzień (poza dniami wolnymi), aby dodać zajęcia. Kliknij istniejące zajęcia, aby je edytować lub usunąć.'
-    : 'Kliknij zajęcia, aby zobaczyć szczegóły przedmiotu i spotkania. Włącz „Tryb edycji” u góry, aby dodawać lub zmieniać zajęcia w kalendarzu.';
+    : 'Kliknij zajęcia, aby zobaczyć szczegóły przedmiotu i spotkania. Włącz „Tryb edycji” u góry, aby dodawać lub zmieniać zajęcia oraz edytować strukturę roku.';
 
   render();
 }
@@ -442,11 +484,13 @@ function renderMobileDayTabs(weekEvents, specialDayMap) {
     const dayEvs = weekEvents.filter((e) => e.date === date);
     const effectiveSpecial = specialDayMap.get(date) || holidayFor(date, state.plan.academicYear);
     const isHoliday = effectiveSpecial?.type === 'holiday';
+    const isSession = effectiveSpecial?.type === 'session';
 
     let cls = 'mobile-day-tab';
     if (i === selectedDayIndex) cls += ' active';
     if (date === today()) cls += ' is-today';
     if (isHoliday) cls += ' is-holiday';
+    if (isSession) cls += ' is-session';
 
     const btn = node('button', cls);
     btn.type = 'button';
@@ -458,14 +502,55 @@ function renderMobileDayTabs(weekEvents, specialDayMap) {
     btn.append(code, num, dot);
 
     btn.onclick = () => {
-      selectedDayIndex = i;
-      render();
+      if (i !== selectedDayIndex) {
+        mobileSlideDir = i > selectedDayIndex ? 'slide-next' : 'slide-prev';
+        selectedDayIndex = i;
+        render();
+      }
     };
     nav.append(btn);
   }
 }
 
+function updateLiveTimeIndicator() {
+  const currentToday = today();
+  if (currentToday !== lastRenderedToday) {
+    lastRenderedToday = currentToday;
+    render();
+    return;
+  }
+
+  const nowMin = nowMinutesFloat();
+  const timeStr = nowTimeLabel();
+  const { startMin, endMin } = currentGridBounds;
+
+  for (const line of document.querySelectorAll('[data-now-line]')) {
+    const badge = line.querySelector('[data-now-badge]');
+    if (nowMin < startMin) {
+      line.classList.add('out-of-bounds');
+      line.style.top = '4px';
+      if (badge) badge.textContent = `Teraz · ${timeStr}`;
+    } else if (nowMin > endMin) {
+      line.classList.add('out-of-bounds');
+      line.style.top = 'calc(100% - 14px)';
+      if (badge) badge.textContent = `Teraz · ${timeStr}`;
+    } else {
+      line.classList.remove('out-of-bounds');
+      const topPx = ((nowMin - startMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX;
+      line.style.top = `${topPx}px`;
+      if (badge) badge.textContent = `Teraz · ${timeStr}`;
+    }
+  }
+
+  for (const evEl of document.querySelectorAll('.day.today .event[data-start-min]')) {
+    const evStart = Number(evEl.dataset.startMin);
+    const evEnd = Number(evEl.dataset.endMin);
+    evEl.classList.toggle('is-now', nowMin >= evStart && nowMin < evEnd);
+  }
+}
+
 function render() {
+  lastRenderedToday = today();
   const weekEnd = addDays(week, 6);
   $('weekTitle').textContent = `${formatDate(week)} – ${formatDate(weekEnd)} ${week.slice(0, 4)}`;
   $('jump').value = addDays(week, selectedDayIndex);
@@ -502,6 +587,7 @@ function render() {
   renderMobileDayTabs(events, specialDayMap);
 
   const { startMin, endMin } = getGridBounds(events, weekSpecialDays);
+  currentGridBounds = { startMin, endMin };
   const gridTemplate = buildTimelineGridTemplate(startMin, endMin);
 
   const calendar = $('calendar');
@@ -509,24 +595,35 @@ function render() {
   calendar.replaceChildren();
   calendar.append(renderTimeColumn(startMin, endMin));
 
+  const slideClass = mobileSlideDir;
+  mobileSlideDir = '';
+
   for (let i = 0; i < 7; i++) {
     const date = addDays(week, i);
     const effectiveSpecial = specialDayMap.get(date) || holidayFor(date, state.plan.academicYear);
     const dayEl = renderDay(date, DAY_NAMES[i], events, effectiveSpecial, startMin, endMin, gridTemplate);
-    if (i === selectedDayIndex) dayEl.classList.add('mobile-active');
+    if (i === selectedDayIndex) {
+      dayEl.classList.add('mobile-active');
+      if (slideClass) dayEl.classList.add(slideClass);
+    }
     calendar.append(dayEl);
   }
+
+  updateLiveTimeIndicator();
 }
 
 function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndMin, gridTemplate) {
   const isHoliday = specialDay?.type === 'holiday';
   const isSwap = specialDay?.type === 'swap';
   const isRector = specialDay?.type === 'rector';
+  const isSession = specialDay?.type === 'session';
+  const isToday = date === today();
   const canAddInDay = editMode;
 
   let dayClass = 'day';
-  if (date === today()) dayClass += ' today';
+  if (isToday) dayClass += ' today';
   if (isHoliday) dayClass += ' holiday';
+  if (isSession) dayClass += ' session';
   if (isRector) dayClass += ' rector-day';
 
   const day = node('section', dayClass);
@@ -540,23 +637,32 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
   if (canAddInDay) {
     head.title = isHoliday
       ? `Dzień wolny (${date}) — kliknij, aby dodać wydarzenie własne (poza przedmiotem)`
-      : `Kliknij, aby dodać zajęcia w dniu ${date} (${dayName})`;
+      : isSession
+        ? `Sesja egzaminacyjna (${date}) — kliknij, aby dodać egzamin, poprawkę lub zaliczenie`
+        : `Kliknij, aby dodać zajęcia w dniu ${date} (${dayName})`;
     head.onclick = () => openEventDialog(null, date);
 
     const addHint = node('span', 'dayhead-add');
     addHint.innerHTML = '<i class="ph ph-plus"></i>';
-    addHint.title = isHoliday ? 'Dodaj wydarzenie własne' : 'Dodaj zajęcia w tym dniu';
+    addHint.title = isHoliday
+      ? 'Dodaj wydarzenie własne'
+      : isSession
+        ? 'Dodaj egzamin / zaliczenie'
+        : 'Dodaj zajęcia w tym dniu';
     head.append(addHint);
   }
 
   topWrap.append(head);
 
-  // Oznaczenie dnia specjalnego (święto, weekend, godziny rektorskie lub plan z innego dnia)
+  // Oznaczenie dnia specjalnego (święto, weekend, sesja, godziny rektorskie lub plan z innego dnia)
   if (specialDay) {
     const badge = node('div', `special-day-badge ${specialDay.type}`);
     if (isHoliday) {
       badge.innerHTML = `<i class="ph ph-sun-horizon"></i> `;
       badge.append(document.createTextNode(specialDay.label || 'Dzień wolny'));
+    } else if (isSession) {
+      badge.innerHTML = `<i class="ph ph-scroll"></i> `;
+      badge.append(document.createTextNode(specialDay.label || 'Sesja egzaminacyjna'));
     } else if (isSwap) {
       const targetName = DAY_KEY_NAMES[specialDay.targetDay] || specialDay.targetDay;
       const labelSuffix = specialDay.label ? ` · ${specialDay.label}` : '';
@@ -571,8 +677,11 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
       badge.innerHTML = `<i class="ph ph-graduation-cap"></i> `;
       badge.append(document.createTextNode(`${hoursPart}${labelSuffix}`));
     }
-    badge.onclick = () => openAcademicYearDialog();
-    badge.title = 'Kliknij, aby zarządzać strukturą roku';
+    if (editMode) {
+      badge.classList.add('editable');
+      badge.onclick = () => openAcademicYearDialog();
+      badge.title = 'Kliknij, aby zarządzać strukturą roku';
+    }
     topWrap.append(badge);
   }
 
@@ -596,7 +705,9 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
   if (canAddInDay) {
     timeline.title = isHoliday
       ? 'Kliknij w wiersz godziny, aby dodać wydarzenie własne o tej porze'
-      : 'Kliknij w wiersz godziny, aby dodać zajęcia o tej porze';
+      : isSession
+        ? 'Kliknij w wiersz godziny, aby dodać egzamin lub zaliczenie o tej porze'
+        : 'Kliknij w wiersz godziny, aby dodać zajęcia o tej porze';
     timeline.onclick = (e) => {
       if (e.target !== timeline) return;
       const slotIndex = Math.max(0, Math.min(totalSlots - 2, Math.floor(e.offsetY / SLOT_HEIGHT_PX)));
@@ -644,6 +755,18 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
     timeline.append(renderEvent(event, layoutMap.get(event.id), gridStartMin, specialDay));
   }
 
+  // Pasek aktualnej godziny na żywo (jak w USOS-ie, bez potrzeby odświeżania strony)
+  if (isToday) {
+    const nowLine = node('div', 'now-line');
+    nowLine.setAttribute('data-now-line', '');
+    nowLine.setAttribute('aria-hidden', 'true');
+    const nowDot = node('span', 'now-dot');
+    const nowBadge = node('span', 'now-badge');
+    nowBadge.setAttribute('data-now-badge', '');
+    nowLine.append(nowDot, nowBadge);
+    timeline.append(nowLine);
+  }
+
   // Nakładka godzin / dnia rektorskiego
   if (isRector && rectorImpact) {
     const overlay = node(
@@ -681,13 +804,19 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
       emptyBtn.type = 'button';
       emptyBtn.innerHTML = isHoliday
         ? '<i class="ph ph-plus-circle"></i> Dodaj wydarzenie własne'
-        : '<i class="ph ph-plus-circle"></i> Dodaj zajęcia';
+        : isSession
+          ? '<i class="ph ph-plus-circle"></i> Dodaj egzamin / zaliczenie'
+          : '<i class="ph ph-plus-circle"></i> Dodaj zajęcia';
       emptyBtn.onclick = () => openEventDialog(null, date);
       timeline.append(emptyBtn);
     } else if (isHoliday) {
       const emptyHoliday = node('div', 'day-empty-overlay');
       emptyHoliday.innerHTML = '<i class="ph ph-sun-horizon"></i> Dzień wolny od zajęć';
       timeline.append(emptyHoliday);
+    } else if (isSession) {
+      const emptySession = node('div', 'day-empty-overlay session-empty');
+      emptySession.innerHTML = '<i class="ph ph-scroll"></i> Sesja egzaminacyjna';
+      timeline.append(emptySession);
     } else {
       const emptyNormal = node('div', 'day-empty-overlay', 'Brak zajęć');
       timeline.append(emptyNormal);
@@ -718,6 +847,18 @@ function getEventDisplay(event) {
 
 function getEventTypeVisual(typeStr, isCustom = false) {
   const t = (typeStr || '').toLowerCase();
+  if (t.includes('poprawk') || t.includes('komis')) {
+    return { variant: 'type-retake', icon: 'ph-arrow-counter-clockwise' };
+  }
+  if (t.includes('egzamin')) {
+    return { variant: 'type-exam', icon: 'ph-scroll' };
+  }
+  if (t.includes('kolokwium') || t.includes('zaliczeni') || t.includes('wejściów') || t.includes('test')) {
+    return { variant: 'type-test', icon: 'ph-check-square-offset' };
+  }
+  if (t.includes('obrona') || t.includes('dyplom')) {
+    return { variant: 'type-defense', icon: 'ph-graduation-cap' };
+  }
   if (t.includes('wykład') || t.includes('wyklad')) {
     return { variant: 'type-lecture', icon: 'ph-chalkboard-teacher' };
   }
@@ -733,9 +874,6 @@ function getEventTypeVisual(typeStr, isCustom = false) {
   if (t.includes('seminarium')) {
     return { variant: 'type-seminar', icon: 'ph-chats-circle' };
   }
-  if (t.includes('egzamin') || t.includes('kolokwium') || t.includes('zaliczenie')) {
-    return { variant: 'type-exam', icon: 'ph-warning-octagon' };
-  }
   if (t.includes('konsultac') || t.includes('promotor') || t.includes('spotkanie')) {
     return { variant: 'type-consult', icon: 'ph-user-focus' };
   }
@@ -747,9 +885,6 @@ function getEventTypeVisual(typeStr, isCustom = false) {
   }
   if (t.includes('warsztat') || t.includes('szkoleni') || t.includes('kurs') || t.includes('trening')) {
     return { variant: 'type-exercise', icon: 'ph-wrench' };
-  }
-  if (t.includes('obrona') || t.includes('dyplom')) {
-    return { variant: 'type-lecture', icon: 'ph-graduation-cap' };
   }
   if (t.includes('koło') || t.includes('kolo') || t.includes('zebranie') || t.includes('rada')) {
     return { variant: 'type-consult', icon: 'ph-users-three' };
@@ -786,6 +921,8 @@ function renderEvent(event, layout, gridStartMin, specialDay = null) {
 
   const button = node('button', className);
   button.type = 'button';
+  button.dataset.startMin = String(startMin);
+  button.dataset.endMin = String(endMin);
   button.title = [
     `${event.start} – ${event.end}`,
     title,
@@ -884,7 +1021,7 @@ function openEventDetailsDialog(id) {
     $('detailsSubjectSection').hidden = !setSubjectDetailsContent(subject.details);
   }
 
-  $('eventDetailsDialog').showModal();
+  showDialogModal($('eventDetailsDialog'));
 }
 
 function setSubjectDetailsContent(details) {
@@ -937,7 +1074,7 @@ function openSubjectDialog(message = '', subjectToEdit = null) {
   resetSubjectForm();
   if (subjectToEdit) fillSubjectForm(subjectToEdit);
   $('subjectError').textContent = message;
-  $('subjectDialog').showModal();
+  showDialogModal($('subjectDialog'));
 }
 
 function resetSubjectForm() {
@@ -1132,11 +1269,20 @@ function openEventDialog(id, initialDate = null, initialStart = null) {
     $('remote').checked = false;
     $('customTitle').value = '';
     const isTargetHoliday = !!holidayFor(targetDate, state.plan.academicYear);
+    const targetSpecial = (state.plan.academicYear?.specialDays || []).find(
+      (sd) => sd.date === targetDate,
+    );
+    const isTargetSession = targetSpecial?.type === 'session';
     const defaultToCustom = !state.plan.subjects.length || isTargetHoliday;
     if (defaultToCustom) {
       select.value = CUSTOM_SUBJECT_VALUE;
     }
-    setSelectedEventType(defaultToCustom ? 'Spotkanie' : 'Laboratorium', defaultToCustom);
+    const defaultType = defaultToCustom
+      ? 'Spotkanie'
+      : isTargetSession
+        ? 'Egzamin'
+        : 'Laboratorium';
+    setSelectedEventType(defaultType, defaultToCustom);
     const startVal = initialStart || (defaultToCustom ? '12:00' : '08:00');
     const defaultDurationMin = defaultToCustom ? 60 : 90;
     $('start').value = startVal;
@@ -1144,7 +1290,7 @@ function openEventDialog(id, initialDate = null, initialStart = null) {
   }
 
   updateSubjectSelectionFields();
-  $('eventDialog').showModal();
+  showDialogModal($('eventDialog'));
 }
 
 function updateRepeatFields() {
@@ -1352,8 +1498,9 @@ function renderSeriesList() {
 }
 
 function openBulkDialog() {
+  if (!editMode) return;
   renderSeriesList();
-  $('bulkDialog').showModal();
+  showDialogModal($('bulkDialog'));
 }
 
 function runReconcile() {
@@ -1420,11 +1567,11 @@ function groupSpecialDays(specialDays) {
   for (let i = 0; i < sorted.length; i++) {
     const current = sorted[i];
 
-    if (current.type === 'holiday') {
+    if (current.type === 'holiday' || current.type === 'session') {
       let j = i;
       while (
         j + 1 < sorted.length &&
-        sorted[j + 1].type === 'holiday' &&
+        sorted[j + 1].type === current.type &&
         (sorted[j + 1].label || '') === (current.label || '') &&
         sorted[j + 1].date === addDays(sorted[j].date, 1)
       ) {
@@ -1433,7 +1580,7 @@ function groupSpecialDays(specialDays) {
 
       if (j > i) {
         groups.push({
-          type: 'holiday',
+          type: current.type,
           label: current.label,
           startDate: current.date,
           endDate: sorted[j].date,
@@ -1469,7 +1616,7 @@ function renderSpecialDaysList() {
 
   if (!specialDays.length) {
     container.append(
-      node('p', 'hint', 'Brak zdefiniowanych dni wolnych, przerw i godzin rektorskich. Dodaj je poniżej.'),
+      node('p', 'hint', 'Brak zdefiniowanych dni wolnych, sesji, przerw i godzin rektorskich. Dodaj je poniżej.'),
     );
     return;
   }
@@ -1485,6 +1632,8 @@ function renderSpecialDaysList() {
     let badgeText = 'Zamiana';
     if (group.type === 'holiday') {
       badgeText = isRange ? `Przerwa (${group.count} dni)` : 'Wolne';
+    } else if (group.type === 'session') {
+      badgeText = isRange ? `Sesja (${group.count} dni)` : 'Sesja';
     } else if (group.type === 'rector') {
       badgeText = group.start && group.end ? `Rektorskie ${group.start}–${group.end}` : 'Dzień rektorski';
     }
@@ -1493,7 +1642,17 @@ function renderSpecialDaysList() {
     const dateRangeStr = isRange ? `${group.startDate} → ${group.endDate}` : group.startDate;
     dateLine.append(node('span', '', dateRangeStr), badge);
 
-    let descText = group.label || (group.type === 'holiday' ? (isRange ? 'Przerwa świąteczna / wolna' : 'Dzień wolny') : '');
+    let descText =
+      group.label ||
+      (group.type === 'holiday'
+        ? isRange
+          ? 'Przerwa świąteczna / wolna'
+          : 'Dzień wolny'
+        : group.type === 'session'
+          ? isRange
+            ? 'Sesja egzaminacyjna / poprawkowa (brak zwykłych zajęć)'
+            : 'Dzień sesji egzaminacyjnej'
+          : '');
     if (group.type === 'swap') {
       const targetName = DAY_KEY_NAMES[group.targetDay] || group.targetDay;
       const swapDesc = `Zajęcia według planu z ${targetName}`;
@@ -1519,6 +1678,7 @@ function renderSpecialDaysList() {
 }
 
 function openAcademicYearDialog() {
+  if (!editMode) return;
   renderSpecialDaysList();
   $('academicYearError').textContent = '';
   $('specialDayDate').value = today();
@@ -1529,13 +1689,13 @@ function openAcademicYearDialog() {
   $('rectorStart').value = '10:00';
   $('rectorEnd').value = '14:00';
   updateSpecialDayTypeFields();
-  $('academicYearDialog').showModal();
+  showDialogModal($('academicYearDialog'));
 }
 
 function updateSpecialDayTypeFields() {
   const type = $('specialDayType').value;
   const isSwap = type === 'swap';
-  const isRange = type === 'holiday_range';
+  const isRange = type === 'holiday_range' || type === 'session_range';
   const isRector = type === 'rector';
   const fullDayRector = $('rectorFullDay').checked;
 
@@ -1588,13 +1748,13 @@ function saveSpecialDay(event) {
 
     const datesToAdd = [];
 
-    if (type === 'holiday_range') {
+    if (type === 'holiday_range' || type === 'session_range') {
       if (!endDate || endDate < startDate) {
-        throw Error('Data końcowa przerwy musi być późniejsza lub równa dacie początkowej.');
+        throw Error('Data końcowa musi być późniejsza lub równa dacie początkowej.');
       }
       for (let cur = startDate; cur <= endDate; cur = addDays(cur, 1)) {
         if (datesToAdd.length >= 366) {
-          throw Error('Przerwa nie może trwać dłużej niż 366 dni.');
+          throw Error('Zakres nie może trwać dłużej niż 366 dni.');
         }
         datesToAdd.push(cur);
       }
@@ -1613,6 +1773,13 @@ function saveSpecialDay(event) {
         }
       }
 
+      const normalizedType =
+        type === 'session' || type === 'session_range'
+          ? 'session'
+          : type === 'swap'
+            ? 'swap'
+            : 'holiday';
+
       for (const d of datesToAdd) {
         if (type === 'rector') {
           const item = { date: d, type: 'rector', label };
@@ -1622,7 +1789,7 @@ function saveSpecialDay(event) {
           }
           plan.academicYear.specialDays.push(item);
         } else {
-          const item = { date: d, type: type === 'swap' ? 'swap' : 'holiday', label };
+          const item = { date: d, type: normalizedType, label };
           if (type === 'swap') item.targetDay = targetDay;
           plan.academicYear.specialDays.push(item);
         }
@@ -1703,7 +1870,7 @@ function openConnectionDialog() {
     $('planId').value = getActivePlanId();
     $('token').value = localStorage.getItem(TOKEN_KEY) || '';
     $('connectionError').textContent = '';
-    $('connectionDialog').showModal();
+    showDialogModal($('connectionDialog'));
   } catch (err) {
     setStatus(err.message);
   }
@@ -1898,6 +2065,14 @@ function bindEvents() {
     button.onclick = () => button.closest('dialog').close();
   }
 
+  for (const dialog of document.querySelectorAll('dialog')) {
+    dialog.addEventListener('close', syncModalScrollLock);
+    dialog.addEventListener('cancel', () => setTimeout(syncModalScrollLock, 0));
+    dialog.addEventListener('click', (e) => {
+      if (e.target === dialog) dialog.close();
+    });
+  }
+
   $('prev').onclick = () => showWeek(addDays(week, -7));
   $('next').onclick = () => showWeek(addDays(week, 7));
   $('today').onclick = () => {
@@ -1916,17 +2091,60 @@ function bindEvents() {
   // Przełączanie dni gestem przesunięcia palcem (swipe lewo/prawo) na telefonie
   let touchStartX = null;
   let touchStartY = null;
-  $('calendar').addEventListener(
+  let isHorizontalSwipe = null;
+  const calendarEl = $('calendar');
+
+  const resetActiveDayDrag = () => {
+    const activeDay = calendarEl.querySelector('.day.mobile-active');
+    if (activeDay) {
+      activeDay.style.transform = '';
+      activeDay.style.opacity = '';
+      activeDay.style.transition = '';
+    }
+  };
+
+  calendarEl.addEventListener(
     'touchstart',
     (e) => {
-      if (e.touches.length === 1) {
+      if (e.touches.length === 1 && window.innerWidth <= 768) {
         touchStartX = e.touches[0].clientX;
         touchStartY = e.touches[0].clientY;
+        isHorizontalSwipe = null;
       }
     },
     { passive: true },
   );
-  $('calendar').addEventListener(
+  calendarEl.addEventListener(
+    'touchmove',
+    (e) => {
+      if (touchStartX === null || e.touches.length !== 1 || window.innerWidth > 768) return;
+      const dx = e.touches[0].clientX - touchStartX;
+      const dy = e.touches[0].clientY - touchStartY;
+
+      if (isHorizontalSwipe === null && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
+        isHorizontalSwipe = Math.abs(dx) > Math.abs(dy) * 1.3;
+      }
+
+      if (isHorizontalSwipe) {
+        const activeDay = calendarEl.querySelector('.day.mobile-active');
+        if (activeDay) {
+          const dampedX = Math.max(-90, Math.min(90, dx * 0.38));
+          const progress = Math.min(1, Math.abs(dx) / 220);
+          activeDay.style.transition = 'none';
+          activeDay.style.transform = `translate3d(${dampedX.toFixed(1)}px, 0, 0)`;
+          activeDay.style.opacity = String((1 - progress * 0.25).toFixed(2));
+        }
+      }
+    },
+    { passive: true },
+  );
+  calendarEl.addEventListener('touchcancel', () => {
+    touchStartX = null;
+    touchStartY = null;
+    isHorizontalSwipe = null;
+    resetActiveDayDrag();
+  });
+  calendarEl.addEventListener(
     'touchend',
     (e) => {
       if (touchStartX === null || !e.changedTouches.length) return;
@@ -1934,10 +2152,12 @@ function bindEvents() {
       const dy = e.changedTouches[0].clientY - touchStartY;
       touchStartX = null;
       touchStartY = null;
+      isHorizontalSwipe = null;
 
-      if (window.innerWidth <= 768 && Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+      if (window.innerWidth <= 768 && Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
         if (dx < 0) {
           // Przesunięcie w lewo → następny dzień
+          mobileSlideDir = 'slide-next';
           if (selectedDayIndex < 6) {
             selectedDayIndex++;
             render();
@@ -1947,6 +2167,7 @@ function bindEvents() {
           }
         } else {
           // Przesunięcie w prawo → poprzedni dzień
+          mobileSlideDir = 'slide-prev';
           if (selectedDayIndex > 0) {
             selectedDayIndex--;
             render();
@@ -1955,10 +2176,18 @@ function bindEvents() {
             showWeek(addDays(week, -7));
           }
         }
+      } else {
+        resetActiveDayDrag();
       }
     },
     { passive: true },
   );
+
+  // Odświeżanie na żywo paska aktualnej godziny (bez przeładowywania strony)
+  setInterval(updateLiveTimeIndicator, 10_000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) updateLiveTimeIndicator();
+  });
 
   $('export').onclick = () => {
     setMobileMenuOpen(false);

@@ -181,7 +181,10 @@
               <option value="Ćwiczenia">Ćwiczenia</option>
               <option value="Seminarium">Seminarium</option>
               <option value="Konsultacje">Konsultacje</option>
-              <option value="Egzamin / Kolokwium">Egzamin / Kolokwium</option>
+              <option value="Egzamin">Egzamin</option>
+              <option value="Egzamin poprawkowy / Poprawka">Egzamin poprawkowy / Poprawka</option>
+              <option value="Zaliczenie / Kolokwium">Zaliczenie / Kolokwium</option>
+              <option value="Obrona projektu / pracy">Obrona projektu / pracy</option>
               <option value="Odrabianie zajęć">Odrabianie zajęć</option>
               <option value="Spotkanie">Spotkanie</option>
               <option value="Spotkanie z promotorem">Spotkanie z promotorem</option>
@@ -406,7 +409,7 @@
         </div>
 
         <p class="hint">
-          Zarządzaj przerwami świątecznymi, dniami wolnymi, zamianami dni tygodnia oraz godzinami/dniami rektorskimi (nakładanymi na plan bez kasowania zajęć).
+          Zarządzaj sesją egzaminacyjną, przerwami świątecznymi, dniami wolnymi, zamianami dni tygodnia oraz godzinami/dniami rektorskimi.
         </p>
 
         <div id="specialDayList"></div>
@@ -416,6 +419,8 @@
           <label>
             Typ
             <select id="specialDayType">
+              <option value="session_range">Sesja egzaminacyjna / poprawkowa (od – do)</option>
+              <option value="session">Pojedynczy dzień sesji egzaminacyjnej</option>
               <option value="holiday_range">Przerwa świąteczna / okres wolny (od – do)</option>
               <option value="holiday">Pojedynczy dzień wolny (święto ustawowe)</option>
               <option value="rector">Godziny / dzień rektorski (nakładka na plan)</option>

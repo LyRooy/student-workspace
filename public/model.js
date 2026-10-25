@@ -104,17 +104,17 @@ function specialDayMap(academicYear) {
  */
 export function effectiveDayKey(date, academicYear, map = specialDayMap(academicYear)) {
   const special = map.get(date);
-  if (special?.type === 'holiday') return null;
+  if (special?.type === 'holiday' || special?.type === 'session') return null;
   if (special?.type === 'swap') return special.targetDay;
   if (isWeekend(date)) return null;
   return getDayOfWeekKey(date);
 }
 
-/** Zwraca wpis dnia wolnego dla daty (w tym domyślnie każdy weekend, o ile nie ma zamiany planu) albo null. */
+/** Zwraca wpis dnia wolnego dla daty (w tym domyślnie każdy weekend, o ile nie ma zamiany planu ani sesji) albo null. */
 export function holidayFor(date, academicYear) {
   const special = specialDayMap(academicYear).get(date);
   if (special?.type === 'holiday') return special;
-  if (special?.type === 'swap') return null;
+  if (special?.type === 'swap' || special?.type === 'session') return null;
   if (isWeekend(date)) return { date, type: 'holiday', label: 'Weekend', isWeekend: true };
   return null;
 }
@@ -319,7 +319,7 @@ function isValidEvent(event, knownIds, subjectIds) {
 
 function isValidSpecialDay(sd, knownDates) {
   if (!sd || !validDate(sd.date) || knownDates.has(sd.date)) return false;
-  if (!['holiday', 'swap', 'rector'].includes(sd.type)) return false;
+  if (!['holiday', 'swap', 'rector', 'session'].includes(sd.type)) return false;
   if (!isText(sd.label, LIMITS.dayLabel)) return false;
   if (sd.type === 'swap') {
     if (!sd.targetDay || !DAY_OF_WEEK_PATTERN.test(sd.targetDay)) return false;
