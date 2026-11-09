@@ -754,6 +754,12 @@ function updateLiveTimeIndicator() {
     const donePill = daySection?.querySelector('[data-today-done]');
     if (donePill) {
       donePill.hidden = !allFinished;
+      daySection.classList.toggle('has-today-done', allFinished);
+      const cal = $('calendar');
+      if (cal) {
+        const hasBoth = allFinished && Boolean(daySection.querySelector('.special-day-badge'));
+        cal.classList.toggle('has-today-done-stack', hasBoth);
+      }
     }
   }
 
@@ -850,14 +856,6 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
   headInfo.append(node('span', '', dayName), node('strong', '', date.slice(8)));
   head.append(headInfo);
 
-  if (isToday) {
-    const donePill = node('span', 'today-done-pill');
-    donePill.setAttribute('data-today-done', '');
-    donePill.hidden = true;
-    donePill.innerHTML = '<i class="ph ph-check-circle"></i><span>Koniec na dziś</span>';
-    head.append(donePill);
-  }
-
   if (canAddInDay) {
     head.title = isHoliday
       ? `Dzień wolny (${date}) — kliknij, aby dodać wydarzenie własne (poza przedmiotem)`
@@ -877,6 +875,15 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
   }
 
   topWrap.append(head);
+
+  if (isToday) {
+    const donePill = node('div', 'today-done-pill');
+    donePill.setAttribute('data-today-done', '');
+    donePill.hidden = true;
+    donePill.title = 'Wszystkie zaplanowane na dziś zajęcia i wydarzenia już się zakończyły';
+    donePill.innerHTML = '<i class="ph-fill ph-check-circle"></i><span>Koniec na dziś</span>';
+    topWrap.append(donePill);
+  }
 
   // Oznaczenie dnia specjalnego (święto, weekend, sesja, godziny rektorskie lub plan z innego dnia)
   if (specialDay) {
