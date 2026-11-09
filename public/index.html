@@ -428,44 +428,57 @@
       </div>
     </dialog>
 
-    <!-- Okno: klucz dostępu do chmury -->
+    <!-- Okno: klucz dostępu do chmury i nazwy plików -->
     <dialog id="connectionDialog">
       <form id="connectionForm">
         <div class="dialoghead">
-          <h2>Połączenie z chmurą</h2>
+          <h2>Połączenie z chmurą i pliki JSON</h2>
           <button type="button" data-close aria-label="Zamknij"><i class="ph ph-x"></i></button>
         </div>
 
         <p>
           Wpisz ten sam klucz co sekret <code>PLAN_TOKEN</code> w Cloudflare.
-          Bez klucza możesz używać planu lokalnie.
+          Możesz osobno nazwać plik planu zajęć oraz plik tablicy Kanban zapisywane w chmurze R2 i przy eksporcie.
         </p>
 
-        <label>
-          Nazwa / ID planu (osoby)
-          <input
-            id="planId"
-            maxlength="60"
-            placeholder="domyślny (lub np. kacper, ania, semestr-zimowy)"
-            autocomplete="off"
-          >
-          <small>
-            Każda nazwa to osobny plan zapisany w chmurze R2 (dozwolone litery bez polskich znaków, cyfry, <code>-</code> i <code>_</code>).
-            Druga osoba może wpisać ten sam <code>PLAN_TOKEN</code> i podać własne ID, aby mieć swój niezależny plan.
-          </small>
-        </label>
+        <div class="pair">
+          <label>
+            Nazwa pliku planu zajęć
+            <input
+              id="planId"
+              maxlength="60"
+              placeholder="domyślny (plan.json)"
+              autocomplete="off"
+            >
+            <small id="planKeyPreview">Plik w chmurze: <code>plan.json</code></small>
+          </label>
+
+          <label>
+            Nazwa pliku tablicy Kanban
+            <input
+              id="kanbanId"
+              maxlength="60"
+              placeholder="domyślny (kanban.json)"
+              autocomplete="off"
+            >
+            <small id="kanbanKeyPreview">Plik w chmurze: <code>kanban.json</code></small>
+          </label>
+        </div>
+        <p class="hint">
+          Dozwolone litery (bez polskich znaków), cyfry, <code>-</code> oraz <code>_</code>. Każda nazwa tworzy osobny plik <code>.json</code> w chmurze R2.
+        </p>
 
         <label>
           Klucz dostępu (PLAN_TOKEN)
           <input id="token" type="password" minlength="32" maxlength="200" autocomplete="off">
         </label>
         <p class="hint">
-          Klucz oraz ID planu zostaną zapisane w tej przeglądarce. Puste pole klucza usuwa zapisany klucz.
+          Klucz oraz nazwy plików zostaną zapisane w tej przeglądarce. Puste pole klucza usuwa zapisany klucz.
         </p>
 
         <p id="connectionError" class="error" role="alert"></p>
 
-        <button type="submit" class="primary">Zapisz ustawienie</button>
+        <button type="submit" class="primary">Zapisz ustawienia</button>
       </form>
     </dialog>
 

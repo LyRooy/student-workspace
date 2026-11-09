@@ -21,6 +21,7 @@ const STORAGE_KEY = 'student-calendar-v1';
 const KANBAN_STORAGE_KEY = 'student-kanban-v1';
 const TOKEN_KEY = 'student-calendar-token';
 const PLAN_ID_KEY = 'student-calendar-plan-id';
+const KANBAN_ID_KEY = 'student-calendar-kanban-id';
 const API_URL = '/api/plan'; // ten sam adres co frontend — Worker obsługuje oba
 const KANBAN_API_URL = '/api/kanban';
 const API_TIMEOUT_MS = 20_000;
@@ -187,6 +188,7 @@ function updateViewToolbarAndHeader() {
   $('importLabel').textContent = isKanban ? 'Import tablicy (.json)' : 'Import planu (.json)';
   $('pullLabel').textContent = isKanban ? 'Pobierz tablicę z chmury' : 'Pobierz plan z chmury';
   $('pushLabel').textContent = isKanban ? 'Zapisz tablicę w chmurze' : 'Zapisz plan w chmurze';
+  updateConnectionButtonLabel();
 }
 
 function setActiveView(view) {
@@ -2779,7 +2781,9 @@ function showWeek(newWeek) {
 function exportActiveView() {
   const isKanban = activeView === 'kanban';
   const payload = isKanban ? kanbanState.kanban : state.plan;
-  const filename = isKanban ? `kanban-${today()}.json` : `plan-${today()}.json`;
+  const customBase = isKanban ? getActiveKanbanId() : getActivePlanId();
+  const baseName = customBase || (isKanban ? 'kanban' : 'plan');
+  const filename = `${baseName}-${today()}.json`;
 
   const json = JSON.stringify(payload, null, 2);
   const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
@@ -2846,18 +2850,50 @@ function getActivePlanId() {
   }
 }
 
+function getActiveKanbanId() {
+  try {
+    return (localStorage.getItem(KANBAN_ID_KEY) || '').trim().toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function updateConnectionPreviews() {
+  const rawPlan = ($('planId')?.value || '').trim().toLowerCase();
+  const rawKanban = ($('kanbanId')?.value || '').trim().toLowerCase();
+
+  try {
+    const planKey = resolvePlanKey(rawPlan);
+    $('planKeyPreview').innerHTML = `Plik w chmurze: <code>${planKey}</code>`;
+  } catch {
+    $('planKeyPreview').textContent = 'Dozwolone tylko litery bez polskich znaków, cyfry, - i _';
+  }
+
+  try {
+    const kanbanKey = resolveKanbanKey(rawKanban);
+    $('kanbanKeyPreview').innerHTML = `Plik w chmurze: <code>${kanbanKey}</code>`;
+  } catch {
+    $('kanbanKeyPreview').textContent = 'Dozwolone tylko litery bez polskich znaków, cyfry, - i _';
+  }
+}
+
 function updateConnectionButtonLabel() {
-  const id = getActivePlanId();
   const btn = $('connection');
+  if (!btn) return;
+  const isKanban = activeView === 'kanban';
+  const id = isKanban ? getActiveKanbanId() : getActivePlanId();
+  const defaultFile = isKanban ? 'kanban.json' : 'plan.json';
   btn.innerHTML = '<i class="ph ph-key"></i> ';
-  btn.append(document.createTextNode(id ? `Chmura (${id})` : 'Klucz / ID planu'));
+  btn.append(document.createTextNode(id ? `Chmura (${id}.json)` : `Chmura (${defaultFile})`));
 }
 
 function openConnectionDialog() {
   try {
     $('planId').value = getActivePlanId();
+    $('kanbanId').value = getActiveKanbanId();
     $('token').value = localStorage.getItem(TOKEN_KEY) || '';
     $('connectionError').textContent = '';
+    updateConnectionPreviews();
     showDialogModal($('connectionDialog'));
   } catch (err) {
     setStatus(err.message);
@@ -2868,9 +2904,11 @@ function saveConnection(event) {
   event.preventDefault();
   try {
     const rawPlanId = $('planId').value.trim().toLowerCase();
-    // Walidacja formatu nazwy/ID dla planu i tablicy Kanban
-    resolvePlanKey(rawPlanId);
-    resolveKanbanKey(rawPlanId);
+    const rawKanbanId = $('kanbanId').value.trim().toLowerCase();
+
+    // Walidacja formatu nazwy/ID osobno dla planu i osobno dla tablicy Kanban
+    const planKey = resolvePlanKey(rawPlanId);
+    const kanbanKey = resolveKanbanKey(rawKanbanId);
 
     const token = $('token').value.trim();
     if (token && token.length < MIN_TOKEN_LENGTH) {
@@ -2878,8 +2916,13 @@ function saveConnection(event) {
     }
 
     const prevPlanId = getActivePlanId();
+    const prevKanbanId = getActiveKanbanId();
+
     if (rawPlanId) localStorage.setItem(PLAN_ID_KEY, rawPlanId);
     else localStorage.removeItem(PLAN_ID_KEY);
+
+    if (rawKanbanId) localStorage.setItem(KANBAN_ID_KEY, rawKanbanId);
+    else localStorage.removeItem(KANBAN_ID_KEY);
 
     if (token) localStorage.setItem(TOKEN_KEY, token);
     else localStorage.removeItem(TOKEN_KEY);
@@ -2888,7 +2931,9 @@ function saveConnection(event) {
       const next = clone(state);
       next.etag = null;
       persist(next);
+    }
 
+    if (rawKanbanId !== prevKanbanId) {
       const nextKanban = clone(kanbanState);
       nextKanban.etag = null;
       persistKanban(nextKanban);
@@ -2897,9 +2942,8 @@ function saveConnection(event) {
     updateConnectionButtonLabel();
     $('connectionError').textContent = '';
     $('connectionDialog').close();
-    const label = rawPlanId || 'domyślny';
     setStatus(
-      `Zapisano ustawienia chmury (ID: ${label}). Plan zapisuje się w osobnym pliku JSON, a tablica Kanban w osobnym pliku kanban.json.`,
+      `Zapisano ustawienia chmury (plan: ${planKey} · tablica Kanban: ${kanbanKey}).`,
     );
   } catch (err) {
     $('connectionError').textContent = err.message;
@@ -2964,10 +3008,10 @@ async function sync(direction) {
       openConnectionDialog();
       return;
     }
-    const planId = getActivePlanId();
-    const label = planId || 'domyślny';
     const isKanban = activeView === 'kanban';
     const target = isKanban ? 'kanban' : 'plan';
+    const activeId = isKanban ? getActiveKanbanId() : getActivePlanId();
+    const fileKey = isKanban ? resolveKanbanKey(activeId) : resolvePlanKey(activeId);
     const isDirty = isKanban ? kanbanState.dirty : state.dirty;
     const nounAcc = isKanban ? 'tablicę Kanban' : 'plan';
 
@@ -2985,11 +3029,11 @@ async function sync(direction) {
     setButtonsDisabled(true);
     setStatus(
       direction === 'pull'
-        ? `Pobieranie: ${nounAcc} (${label})…`
-        : `Zapisywanie w chmurze: ${nounAcc} (${label})…`,
+        ? `Pobieranie z chmury: ${fileKey}…`
+        : `Zapisywanie w chmurze: ${fileKey}…`,
     );
 
-    const data = await callApi(direction, token, planId, target);
+    const data = await callApi(direction, token, activeId, target);
 
     if (isKanban) {
       const next = clone(kanbanState);
@@ -2998,7 +3042,7 @@ async function sync(direction) {
       next.dirty = false;
       persistKanban(next);
       renderKanban();
-      setStatus(`Zsynchronizowano tablicę Kanban „${label}” (kanban.json) · ${new Date().toLocaleTimeString('pl-PL')}.`);
+      setStatus(`Zsynchronizowano tablicę Kanban (${fileKey}) · ${new Date().toLocaleTimeString('pl-PL')}.`);
     } else {
       const next = clone(state);
       if (direction === 'pull') next.plan = validatePlan(data.plan);
@@ -3006,7 +3050,7 @@ async function sync(direction) {
       next.dirty = false;
       persist(next);
       render();
-      setStatus(`Zsynchronizowano plan „${label}” (plan.json) · ${new Date().toLocaleTimeString('pl-PL')}.`);
+      setStatus(`Zsynchronizowano plan (${fileKey}) · ${new Date().toLocaleTimeString('pl-PL')}.`);
     }
   } catch (err) {
     if (err.name === 'TimeoutError') {
@@ -3292,6 +3336,8 @@ function bindEvents() {
     setMobileMenuOpen(false);
     openConnectionDialog();
   };
+  $('planId').oninput = updateConnectionPreviews;
+  $('kanbanId').oninput = updateConnectionPreviews;
   $('connectionForm').onsubmit = saveConnection;
   $('pull').onclick = () => sync('pull');
   $('push').onclick = () => sync('push');
