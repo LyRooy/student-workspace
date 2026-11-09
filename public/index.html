@@ -13,8 +13,21 @@
 
   <body>
     <header>
-      <div class="brand">
-        <h1>Plan zajęć<span>.</span></h1>
+      <div class="brand-wrap">
+        <div class="brand">
+          <h1 id="appHeading">Plan zajęć<span>.</span></h1>
+        </div>
+        <nav class="view-tabs" aria-label="Widoki aplikacji">
+          <button type="button" id="tabCalendar" class="view-tab active" aria-selected="true">
+            <i class="ph ph-calendar-dots"></i>
+            <span>Kalendarz</span>
+          </button>
+          <button type="button" id="tabKanban" class="view-tab" aria-selected="false">
+            <i class="ph ph-kanban"></i>
+            <span>Tablica Kanban</span>
+            <span id="kanbanCountBadge" class="tab-badge" hidden>0</span>
+          </button>
+        </nav>
       </div>
       <div class="actions header-actions">
         <button type="button" id="themeToggle" class="desktop-only"><i class="ph ph-circle-half"></i> Auto</button>
@@ -23,6 +36,12 @@
         </button>
         <button type="button" id="addEvent" class="primary" hidden>
           <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zajęcia</span>
+        </button>
+        <button type="button" id="manageKanbanColsBtn" hidden>
+          <i class="ph ph-columns"></i> <span class="btn-label">Kolumny</span>
+        </button>
+        <button type="button" id="addKanbanCardBtn" class="primary" hidden>
+          <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zadanie</span>
         </button>
         <button
           type="button"
@@ -41,53 +60,103 @@
     <main>
       <!-- Panel narzędzi (na telefonie rozwijany z przycisku hamburgera „Menu”) -->
       <div id="navPanel" class="nav-panel">
-        <section class="toolbar" aria-label="Zarządzanie planem">
+        <section class="toolbar" aria-label="Zarządzanie danymi">
           <div class="actions">
             <button type="button" id="themeToggleMobile" class="mobile-only"><i class="ph ph-circle-half"></i> Motyw</button>
             <button type="button" id="subjects"><i class="ph ph-book-open"></i> Przedmioty</button>
             <button type="button" id="academicYearBtn"><i class="ph ph-calendar-blank"></i> Struktura roku</button>
             <button type="button" id="bulkManageBtn"><i class="ph ph-trash"></i> Masowe usuwanie / reset</button>
-            <button type="button" id="export"><i class="ph ph-export"></i> Eksport JSON</button>
-            <button type="button" id="importButton"><i class="ph ph-download-simple"></i> Import JSON</button>
+            <button type="button" id="clearKanbanDoneBtn" hidden>
+              <i class="ph ph-check-circle"></i> Wyczyść „Zrobione”
+            </button>
+            <button type="button" id="resetKanbanBtn" class="danger" hidden>
+              <i class="ph ph-trash"></i> Resetuj tablicę
+            </button>
+            <button type="button" id="export"><i class="ph ph-export"></i> <span id="exportLabel">Eksport planu (.json)</span></button>
+            <button type="button" id="importButton"><i class="ph ph-download-simple"></i> <span id="importLabel">Import planu (.json)</span></button>
             <input type="file" id="import" accept="application/json,.json" hidden>
           </div>
           <div class="actions">
             <button type="button" id="connection"><i class="ph ph-key"></i> Klucz dostępu</button>
-            <button type="button" id="pull"><i class="ph ph-arrow-down"></i> Pobierz z chmury</button>
-            <button type="button" id="push" class="primary"><i class="ph ph-arrow-up"></i> Zapisz w chmurze</button>
+            <button type="button" id="pull"><i class="ph ph-arrow-down"></i> <span id="pullLabel">Pobierz z chmury</span></button>
+            <button type="button" id="push" class="primary"><i class="ph ph-arrow-up"></i> <span id="pushLabel">Zapisz w chmurze</span></button>
           </div>
         </section>
 
         <p id="status" class="status" role="status" aria-live="polite"></p>
       </div>
 
-      <!-- Nawigacja po tygodniach -->
-      <section class="weekbar">
-        <div class="weekbar-info">
-          <span class="eyebrow">KALENDARZ TYGODNIOWY</span>
-          <h2 id="weekTitle"></h2>
-          <p id="summary"></p>
-        </div>
-        <div class="actions weekbar-actions">
-          <button type="button" id="prev" aria-label="Poprzedni tydzień"><i class="ph ph-arrow-left"></i></button>
-          <button type="button" id="today"><i class="ph ph-calendar-check"></i> Dzisiaj</button>
-          <button type="button" id="next" aria-label="Następny tydzień"><i class="ph ph-arrow-right"></i></button>
-          <label class="datejump">
-            <span class="datejump-label">Przejdź do</span>
-            <input type="date" id="jump" aria-label="Przejdź do wybranej daty">
-          </label>
-        </div>
-      </section>
+      <!-- WIDOK 1: KALENDARZ TYGODNIOWY -->
+      <div id="calendarView">
+        <section class="weekbar">
+          <div class="weekbar-info">
+            <span class="eyebrow">KALENDARZ TYGODNIOWY</span>
+            <h2 id="weekTitle"></h2>
+            <p id="summary"></p>
+          </div>
+          <div class="actions weekbar-actions">
+            <button type="button" id="prev" aria-label="Poprzedni tydzień"><i class="ph ph-arrow-left"></i></button>
+            <button type="button" id="today"><i class="ph ph-calendar-check"></i> Dzisiaj</button>
+            <button type="button" id="next" aria-label="Następny tydzień"><i class="ph ph-arrow-right"></i></button>
+            <label class="datejump">
+              <span class="datejump-label">Przejdź do</span>
+              <input type="date" id="jump" aria-label="Przejdź do wybranej daty">
+            </label>
+          </div>
+        </section>
 
-      <nav id="mobileDayTabs" class="mobile-day-tabs" aria-label="Wybór dnia tygodnia"></nav>
+        <nav id="mobileDayTabs" class="mobile-day-tabs" aria-label="Wybór dnia tygodnia"></nav>
 
-      <div class="calendar-scroll">
-        <div id="calendar" class="calendar"></div>
+        <div class="calendar-scroll">
+          <div id="calendar" class="calendar"></div>
+        </div>
+
+        <p id="calendarHint" class="hint">
+          Kliknij zajęcia, aby zobaczyć szczegóły przedmiotu i spotkania. Włącz „Tryb edycji” u góry, aby dodawać lub zmieniać zajęcia w kalendarzu.
+        </p>
       </div>
 
-      <p id="calendarHint" class="hint">
-        Kliknij zajęcia, aby zobaczyć szczegóły przedmiotu i spotkania. Włącz „Tryb edycji” u góry, aby dodawać lub zmieniać zajęcia w kalendarzu.
-      </p>
+      <!-- WIDOK 2: TABLICA KANBAN (osobny plik JSON i osobna synchronizacja w chmurze) -->
+      <section id="kanbanView" class="kanban-view" hidden aria-label="Tablica zadań Kanban">
+        <div class="kanban-bar">
+          <div class="kanban-bar-info">
+            <span class="eyebrow">ORGANIZACJA STUDIÓW · OSOBNY PLIK KANBAN.JSON</span>
+            <h2>Tablica zadań i projektów</h2>
+            <p id="kanbanSummary"></p>
+          </div>
+          <div class="kanban-filters">
+            <label class="kanban-filter-item">
+              <span>Przedmiot</span>
+              <select id="kanbanFilterSubject">
+                <option value="">Wszystkie przedmioty</option>
+              </select>
+            </label>
+            <label class="kanban-filter-item">
+              <span>Priorytet</span>
+              <select id="kanbanFilterPriority">
+                <option value="">Wszystkie</option>
+                <option value="high">Wysoki</option>
+                <option value="medium">Średni</option>
+                <option value="low">Niski</option>
+              </select>
+            </label>
+            <label class="kanban-filter-item kanban-search-wrap">
+              <span>Szukaj</span>
+              <input type="search" id="kanbanSearch" placeholder="Tytuł, opis, kategoria...">
+            </label>
+          </div>
+        </div>
+
+        <nav id="mobileKanbanTabs" class="mobile-day-tabs mobile-kanban-tabs" aria-label="Wybór kolumny Kanban"></nav>
+
+        <div class="kanban-scroll">
+          <div id="kanbanBoard" class="kanban-board"></div>
+        </div>
+
+        <p id="kanbanHint" class="hint">
+          Przeciągaj karty między kolumnami (drag &amp; drop) lub używaj strzałek na karcie. Tablica zapisuje się w osobnym pliku <code>kanban.json</code> (zarówno lokalnie, jak i w chmurze R2).
+        </p>
+      </section>
     </main>
 
     <footer class="app-footer">
@@ -482,6 +551,289 @@
         <div class="dialogfoot">
           <button type="submit" class="primary">Dodaj do struktury roku</button>
         </div>
+      </form>
+    </dialog>
+
+    <!-- Okno: dodawanie / edycja karty zadania na tablicy Kanban -->
+    <dialog id="kanbanCardDialog">
+      <form id="kanbanCardForm">
+        <div class="dialoghead">
+          <h2 id="kanbanCardDialogTitle">Dodaj zadanie</h2>
+          <button type="button" data-close aria-label="Zamknij"><i class="ph ph-x"></i></button>
+        </div>
+
+        <label>
+          Tytuł zadania
+          <input
+            id="kanbanCardTitleInput"
+            required
+            maxlength="160"
+            placeholder="np. Oddać sprawozdanie nr 3 z Deep Learningu"
+          >
+        </label>
+
+        <div class="pair">
+          <label>
+            Kolumna (status)
+            <select id="kanbanCardColumn" required></select>
+          </label>
+          <label>
+            Priorytet
+            <select id="kanbanCardPriority">
+              <option value="low">Niski</option>
+              <option value="medium" selected>Średni</option>
+              <option value="high">Wysoki (pilne)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="pair">
+          <label>
+            Przedmiot (opcjonalnie)
+            <select id="kanbanCardSubjectSelect"></select>
+            <input
+              id="kanbanCardSubjectCustom"
+              maxlength="120"
+              placeholder="Wpisz nazwę przedmiotu lub projektu..."
+              hidden
+            >
+          </label>
+          <label>
+            Kategoria zadania
+            <select id="kanbanCardCategorySelect">
+              <option value="Projekt">Projekt</option>
+              <option value="Laboratorium">Laboratorium / Sprawozdanie</option>
+              <option value="Zaliczenie / Kolokwium">Zaliczenie / Kolokwium</option>
+              <option value="Egzamin">Egzamin</option>
+              <option value="Egzamin poprawkowy / Poprawka">Poprawka</option>
+              <option value="Obrona projektu / pracy">Praca dyplomowa / Obrona</option>
+              <option value="Ćwiczenia">Zadanie domowe / Ćwiczenia</option>
+              <option value="Seminarium">Prezentacja / Seminarium</option>
+              <option value="Spotkanie">Spotkanie / Konsultacje</option>
+              <option value="Zadanie">Zadanie</option>
+              <option value="">Bez kategorii</option>
+              <option value="__custom__">Inna (wpisz własną)...</option>
+            </select>
+            <input
+              id="kanbanCardCategoryCustom"
+              maxlength="60"
+              placeholder="Wpisz własną kategorię..."
+              hidden
+            >
+          </label>
+        </div>
+
+        <label>
+          Termin wykonania / deadline (opcjonalnie)
+          <input id="kanbanCardDueDate" type="date" min="2000-01-01" max="2100-12-31">
+        </label>
+
+        <div class="kanban-checklist-editor">
+          <span class="field-label">Lista podzadań (checklista)</span>
+          <div id="kanbanChecklistItems" class="kanban-checklist-items"></div>
+          <div class="kanban-checklist-add">
+            <input
+              type="text"
+              id="kanbanNewCheckItem"
+              maxlength="200"
+              placeholder="Dodaj podpunkt (np. Przygotować wykresy)..."
+            >
+            <button type="button" id="addKanbanCheckItemBtn">
+              <i class="ph ph-plus"></i> Dodaj
+            </button>
+          </div>
+        </div>
+
+        <label>
+          Opis / notatki (opcjonalnie)
+          <textarea
+            id="kanbanCardDesc"
+            maxlength="2000"
+            placeholder="Szczegóły zadania, wymagania, linki..."
+          ></textarea>
+        </label>
+
+        <p id="kanbanCardError" class="error" role="alert"></p>
+
+        <div class="dialogfoot">
+          <button type="button" id="deleteKanbanCardBtn" class="danger" hidden>
+            <i class="ph ph-trash"></i> Usuń zadanie
+          </button>
+          <button type="submit" class="primary">Zapisz zadanie</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Okno: zarządzanie kolumnami tablicy Kanban -->
+    <dialog id="kanbanColumnsDialog">
+      <div class="dialoghead">
+        <h2>Kolumny tablicy Kanban</h2>
+        <button type="button" data-close aria-label="Zamknij"><i class="ph ph-x"></i></button>
+      </div>
+
+      <p class="hint">
+        Dostosuj kolumny swojej tablicy (maks. 12 kolumn). Nie można usunąć kolumny, w której znajdują się zadania — najpierw przenieś je do innej kolumny.
+      </p>
+
+      <div id="kanbanColumnsList" class="bulk-list"></div>
+
+      <form id="kanbanColumnForm" class="kanban-col-form">
+        <label>
+          Nowa kolumna
+          <div class="kanban-checklist-add">
+            <input
+              id="newKanbanColumnTitle"
+              required
+              maxlength="60"
+              placeholder="np. Do sprawdzenia, Pomysły, Czeka na ocenę..."
+            >
+            <button type="submit" class="primary">
+              <i class="ph ph-plus"></i> Dodaj kolumnę
+            </button>
+          </div>
+        </label>
+        <p id="kanbanColumnsError" class="error" role="alert"></p>
+      </form>
+    </dialog>
+
+    <!-- Okno: dodawanie / edycja karty zadania na tablicy Kanban -->
+    <dialog id="kanbanCardDialog">
+      <form id="kanbanCardForm">
+        <div class="dialoghead">
+          <h2 id="kanbanCardDialogTitle">Dodaj zadanie</h2>
+          <button type="button" data-close aria-label="Zamknij"><i class="ph ph-x"></i></button>
+        </div>
+
+        <label>
+          Tytuł zadania
+          <input
+            id="kanbanCardTitleInput"
+            required
+            maxlength="160"
+            placeholder="np. Oddać sprawozdanie nr 3 z Deep Learningu"
+          >
+        </label>
+
+        <div class="pair">
+          <label>
+            Kolumna (status)
+            <select id="kanbanCardColumn" required></select>
+          </label>
+          <label>
+            Priorytet
+            <select id="kanbanCardPriority">
+              <option value="low">Niski</option>
+              <option value="medium" selected>Średni</option>
+              <option value="high">Wysoki (pilne)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="pair">
+          <label>
+            Przedmiot (opcjonalnie)
+            <select id="kanbanCardSubjectSelect"></select>
+            <input
+              id="kanbanCardSubjectCustom"
+              maxlength="120"
+              placeholder="Wpisz nazwę przedmiotu lub projektu..."
+              hidden
+            >
+          </label>
+          <label>
+            Kategoria zadania
+            <select id="kanbanCardCategorySelect">
+              <option value="Projekt">Projekt</option>
+              <option value="Laboratorium">Laboratorium / Sprawozdanie</option>
+              <option value="Zaliczenie / Kolokwium">Zaliczenie / Kolokwium</option>
+              <option value="Egzamin">Egzamin</option>
+              <option value="Egzamin poprawkowy / Poprawka">Poprawka</option>
+              <option value="Obrona projektu / pracy">Praca dyplomowa / Obrona</option>
+              <option value="Ćwiczenia">Zadanie domowe / Ćwiczenia</option>
+              <option value="Seminarium">Prezentacja / Seminarium</option>
+              <option value="Spotkanie">Spotkanie / Konsultacje</option>
+              <option value="">Bez kategorii</option>
+              <option value="__custom__">✎ Inna (wpisz własną)...</option>
+            </select>
+            <input
+              id="kanbanCardCategoryCustom"
+              maxlength="60"
+              placeholder="Wpisz własną kategorię..."
+              hidden
+            >
+          </label>
+        </div>
+
+        <label>
+          Termin wykonania / deadline (opcjonalnie)
+          <input id="kanbanCardDueDate" type="date" min="2000-01-01" max="2100-12-31">
+        </label>
+
+        <div class="kanban-checklist-editor">
+          <span class="field-label">Lista podzadań (checklista)</span>
+          <div id="kanbanChecklistItems" class="kanban-checklist-items"></div>
+          <div class="kanban-checklist-add">
+            <input
+              type="text"
+              id="kanbanNewCheckItem"
+              maxlength="200"
+              placeholder="Dodaj podpunkt (np. Przygotować wykresy)..."
+            >
+            <button type="button" id="addKanbanCheckItemBtn">
+              <i class="ph ph-plus"></i> Dodaj
+            </button>
+          </div>
+        </div>
+
+        <label>
+          Opis / notatki (opcjonalnie)
+          <textarea
+            id="kanbanCardDesc"
+            maxlength="2000"
+            placeholder="Szczegóły zadania, wymagania, linki..."
+          ></textarea>
+        </label>
+
+        <p id="kanbanCardError" class="error" role="alert"></p>
+
+        <div class="dialogfoot">
+          <button type="button" id="deleteKanbanCardBtn" class="danger" hidden>
+            <i class="ph ph-trash"></i> Usuń zadanie
+          </button>
+          <button type="submit" class="primary">Zapisz zadanie</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Okno: zarządzanie kolumnami tablicy Kanban -->
+    <dialog id="kanbanColumnsDialog">
+      <div class="dialoghead">
+        <h2>Kolumny tablicy Kanban</h2>
+        <button type="button" data-close aria-label="Zamknij"><i class="ph ph-x"></i></button>
+      </div>
+
+      <p class="hint">
+        Dostosuj kolumny swojej tablicy (maks. 12 kolumn). Nie można usunąć kolumny, w której znajdują się zadania — najpierw przenieś je do innej kolumny.
+      </p>
+
+      <div id="kanbanColumnsList" class="bulk-list"></div>
+
+      <form id="kanbanColumnForm" class="kanban-col-form">
+        <label>
+          Nowa kolumna
+          <div class="kanban-checklist-add">
+            <input
+              id="newKanbanColumnTitle"
+              required
+              maxlength="60"
+              placeholder="np. Do sprawdzenia, Pomysły, Czeka na ocenę..."
+            >
+            <button type="submit" class="primary">
+              <i class="ph ph-plus"></i> Dodaj kolumnę
+            </button>
+          </div>
+        </label>
+        <p id="kanbanColumnsError" class="error" role="alert"></p>
       </form>
     </dialog>
   </body>

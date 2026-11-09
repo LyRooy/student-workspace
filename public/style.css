@@ -143,8 +143,69 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-top: 36px;
-  padding-bottom: 24px;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding-top: 32px;
+  padding-bottom: 22px;
+}
+
+.brand-wrap {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.view-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.view-tab {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 13px;
+  border-radius: 9px;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.view-tab:hover {
+  background: var(--control-hover);
+  color: var(--text);
+}
+
+.view-tab.active {
+  background: var(--green);
+  color: var(--on-green);
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.view-tab.active:hover {
+  background: var(--green-hover);
+  color: var(--on-green);
+}
+
+.tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 800;
+  background: var(--accent);
+  color: #ffffff;
+  line-height: 1;
 }
 
 header p {
@@ -1646,6 +1707,481 @@ textarea {
 }
 
 /* ==========================================================================
+   Tablica Kanban (osobny widok SPA + osobny plik kanban.json)
+   ========================================================================== */
+
+.kanban-view {
+  margin-top: 24px;
+}
+
+.kanban-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.kanban-bar-info p {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0;
+}
+
+.kanban-filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.kanban-filter-item {
+  margin: 0;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.kanban-filter-item select,
+.kanban-filter-item input {
+  padding: 8px 11px;
+  font-size: 13px;
+  border-radius: 9px;
+  min-width: 155px;
+}
+
+.kanban-search-wrap input {
+  min-width: 210px;
+}
+
+.kanban-scroll {
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.kanban-board {
+  display: grid;
+  grid-template-columns: repeat(var(--kanban-cols, 3), minmax(290px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.kanban-col {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  min-height: 420px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.kanban-col.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--focus);
+}
+
+.kanban-col-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 13px 13px 0 0;
+}
+
+.kanban-col-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kanban-col-title-wrap .ph {
+  font-size: 17px;
+  color: var(--green);
+}
+
+.kanban-col.is-done-col .kanban-col-title-wrap .ph {
+  color: var(--today-border);
+}
+
+.kanban-col-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kanban-col-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.kanban-col-add-btn {
+  padding: 5px 8px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+
+.kanban-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  flex: 1;
+}
+
+.kanban-empty-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 110px;
+  border: 1.5px dashed var(--line);
+  background: transparent;
+  color: var(--faint);
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 16px;
+}
+
+.kanban-empty-col .ph {
+  font-size: 20px;
+}
+
+.kanban-empty-col:hover {
+  background: var(--surface);
+  color: var(--control-text);
+  border-style: solid;
+}
+
+.kanban-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--green);
+  border-radius: 11px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 2px 6px #00000010;
+  cursor: grab;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
+}
+
+.kanban-card:hover {
+  box-shadow: 0 6px 16px var(--shadow);
+}
+
+.kanban-card.dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.kanban-card.priority-high {
+  border-left-color: var(--danger);
+}
+
+.kanban-card.priority-medium {
+  border-left-color: var(--accent);
+}
+
+.kanban-card.priority-low {
+  border-left-color: var(--today-border);
+}
+
+.kanban-card.is-done {
+  opacity: 0.78;
+}
+
+.kanban-card.is-done .kanban-card-title-btn {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.kanban-card-badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.kanban-prio-badge,
+.kanban-subject-badge,
+.kanban-due-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  line-height: 1.3;
+}
+
+.kanban-prio-badge.priority-high {
+  background: #ab343422;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+.kanban-prio-badge.priority-medium {
+  background: #d08b4324;
+  color: var(--accent);
+  border: 1px solid var(--custom-border);
+}
+
+.kanban-prio-badge.priority-low {
+  background: var(--soft);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.kanban-subject-badge {
+  background: var(--soft);
+  color: var(--control-text);
+  border: 1px solid var(--line);
+  text-transform: none;
+  font-weight: 700;
+  font-size: 10.5px;
+  max-width: 100%;
+}
+
+.kanban-subject-badge span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kanban-card-title-btn {
+  all: unset;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1.35;
+  color: var(--text);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.kanban-card-title-btn:hover {
+  color: var(--accent);
+}
+
+.kanban-card-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+/* Checklista na karcie */
+.kanban-card-checklist {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kanban-check-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.kanban-check-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kanban-check-bar {
+  height: 5px;
+  background: var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.kanban-check-fill {
+  height: 100%;
+  background: var(--today-border);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+.kanban-card-checkitems {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kanban-card-checkitem {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.kanban-card-checkitem input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 1px 0 0;
+  padding: 0;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.kanban-card-checkitem.done span {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.kanban-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--line);
+}
+
+.kanban-due-badge.normal {
+  background: var(--soft);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.kanban-due-badge.due-soon {
+  background: #d08b4324;
+  color: var(--accent);
+  border: 1px solid var(--custom-border);
+}
+
+.kanban-due-badge.overdue {
+  background: #ab343424;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+.kanban-due-badge.done {
+  background: var(--soft);
+  color: var(--today-border);
+  border: 1px solid var(--line);
+}
+
+.kanban-card-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.kanban-icon-btn {
+  padding: 5px 7px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+/* Edytor checklisty w oknie modalnym */
+.kanban-checklist-editor {
+  margin: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.kanban-checklist-editor .field-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.kanban-checklist-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.kanban-draft-checkrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kanban-draft-checkrow input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.kanban-draft-checkrow input[type="text"] {
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.kanban-checklist-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kanban-checklist-add button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.kanban-col-form {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+/* ==========================================================================
    Responsywność
    ========================================================================== */
 
@@ -1707,8 +2243,25 @@ textarea {
 
   /* Skrócone przyciski edycji i dodawania na pasku górnym telefonu (ikona) */
   #editModeToggle .btn-label,
-  #addEvent .btn-label {
+  #addEvent .btn-label,
+  #manageKanbanColsBtn .btn-label,
+  #addKanbanCardBtn .btn-label {
     display: none;
+  }
+
+  .brand-wrap {
+    gap: 10px;
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .view-tabs {
+    padding: 3px;
+  }
+
+  .view-tab {
+    padding: 6px 10px;
+    font-size: 12px;
   }
 
   .menu-toggle[aria-expanded="true"] {
@@ -1900,6 +2453,73 @@ textarea {
   }
 
   .calendar .day.mobile-active.slide-prev {
+    animation: mobileSlidePrev 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* Widok mobilny tablicy Kanban (jedna aktywna kolumna + pasek przełączania kolumn) */
+  .kanban-view {
+    margin-top: 8px;
+  }
+
+  .kanban-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .kanban-bar .eyebrow {
+    display: none;
+  }
+
+  .kanban-bar h2 {
+    font-size: 16px;
+    margin: 0;
+  }
+
+  .kanban-bar-info p {
+    font-size: 11px;
+  }
+
+  .kanban-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    width: 100%;
+  }
+
+  .kanban-filter-item select,
+  .kanban-filter-item input {
+    min-width: 0;
+    padding: 7px 9px;
+    font-size: 12px;
+  }
+
+  .kanban-search-wrap {
+    grid-column: 1 / -1;
+  }
+
+  .mobile-kanban-tabs {
+    grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
+  }
+
+  .kanban-scroll {
+    overflow-x: hidden;
+  }
+
+  .kanban-board {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .kanban-board .kanban-col:not(.mobile-active) {
+    display: none;
+  }
+
+  .kanban-board .kanban-col.mobile-active.slide-next {
+    animation: mobileSlideNext 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .kanban-board .kanban-col.mobile-active.slide-prev {
     animation: mobileSlidePrev 0.24s cubic-bezier(0.22, 1, 0.36, 1);
   }
 

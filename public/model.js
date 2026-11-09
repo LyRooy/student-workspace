@@ -15,6 +15,13 @@ export const LIMITS = {
   notes: 2000,
   specialDays: 500,
   dayLabel: 120,
+  kanbanColumns: 12,
+  kanbanColumnTitle: 60,
+  kanbanCards: 2000,
+  kanbanCardTitle: 160,
+  kanbanCardDesc: 2000,
+  kanbanChecklistItems: 50,
+  kanbanChecklistText: 200,
 };
 
 const MIN_DATE = '2000-01-01';
@@ -39,6 +46,31 @@ export function resolvePlanKey(rawId) {
   }
   return `plans/${cleaned.toLowerCase()}.json`;
 }
+
+/**
+ * Wyznacza klucz obiektu tablicy Kanban w R2 na podstawie opcjonalnej nazwy/ID.
+ * Puste ID lub 'default' wskazuje na osobny plik 'kanban.json'.
+ */
+export function resolveKanbanKey(rawId) {
+  const cleaned = (rawId ?? '').trim();
+  if (!cleaned || cleaned.toLowerCase() === 'default') return 'kanban.json';
+  if (!PLAN_ID_PATTERN.test(cleaned)) {
+    throw Error('Nazwa planu może zawierać tylko litery (bez polskich znaków), cyfry, myślnik i podkreślenie (maks. 60 znaków).');
+  }
+  return `kanban/${cleaned.toLowerCase()}.json`;
+}
+
+export const DEFAULT_KANBAN_COLUMNS = [
+  { id: 'todo', title: 'Do zrobienia' },
+  { id: 'in_progress', title: 'W trakcie' },
+  { id: 'done', title: 'Zrobione' },
+];
+
+export const emptyKanban = () => ({
+  schemaVersion: SCHEMA_VERSION,
+  columns: DEFAULT_KANBAN_COLUMNS.map((col) => ({ ...col })),
+  cards: [],
+});
 
 export const emptyPlan = () => ({
   schemaVersion: SCHEMA_VERSION,
@@ -380,4 +412,85 @@ export function validatePlan(plan) {
   }
 
   return plan;
+}
+
+// --- Walidacja tablicy Kanban (osobny plik JSON) -----------------------------
+
+const KANBAN_PRIORITIES = new Set(['low', 'medium', 'high']);
+
+function isValidKanbanColumn(col, knownColIds) {
+  return (
+    !!col &&
+    isId(col.id) &&
+    !knownColIds.has(col.id) &&
+    isNonEmptyText(col.title, LIMITS.kanbanColumnTitle)
+  );
+}
+
+function isValidChecklistItem(item, knownItemIds) {
+  return (
+    !!item &&
+    isId(item.id) &&
+    !knownItemIds.has(item.id) &&
+    isNonEmptyText(item.text, LIMITS.kanbanChecklistText) &&
+    typeof item.done === 'boolean'
+  );
+}
+
+function isValidKanbanCard(card, knownCardIds, columnIds) {
+  if (!card || !isId(card.id) || knownCardIds.has(card.id)) return false;
+  if (!columnIds.has(card.columnId)) return false;
+  if (!isNonEmptyText(card.title, LIMITS.kanbanCardTitle)) return false;
+  if (card.description !== undefined && !isText(card.description, LIMITS.kanbanCardDesc)) return false;
+  if (card.subjectName !== undefined && !isText(card.subjectName, LIMITS.subjectName)) return false;
+  if (card.category !== undefined && !isText(card.category, LIMITS.type)) return false;
+  if (!KANBAN_PRIORITIES.has(card.priority)) return false;
+  if (card.dueDate !== undefined && card.dueDate !== '' && !validDate(card.dueDate)) return false;
+  if (typeof card.order !== 'number' || !Number.isFinite(card.order)) return false;
+
+  if (card.checklist !== undefined) {
+    if (!Array.isArray(card.checklist) || card.checklist.length > LIMITS.kanbanChecklistItems) {
+      return false;
+    }
+    const itemIds = new Set();
+    for (const item of card.checklist) {
+      if (!isValidChecklistItem(item, itemIds)) return false;
+      itemIds.add(item.id);
+    }
+  }
+
+  return true;
+}
+
+/** Rzuca błąd, jeśli tablica Kanban ma nieprawidłową strukturę. Zwraca ten sam obiekt. */
+export function validateKanban(kanban) {
+  if (
+    !kanban ||
+    kanban.schemaVersion !== SCHEMA_VERSION ||
+    !Array.isArray(kanban.columns) ||
+    !Array.isArray(kanban.cards) ||
+    kanban.columns.length < 1 ||
+    kanban.columns.length > LIMITS.kanbanColumns ||
+    kanban.cards.length > LIMITS.kanbanCards
+  ) {
+    throw Error(`Nieprawidłowy format tablicy Kanban (schemaVersion: ${SCHEMA_VERSION}).`);
+  }
+
+  const columnIds = new Set();
+  for (const col of kanban.columns) {
+    if (!isValidKanbanColumn(col, columnIds)) {
+      throw Error('Nieprawidłowa kolumna w tablicy Kanban.');
+    }
+    columnIds.add(col.id);
+  }
+
+  const cardIds = new Set();
+  for (const card of kanban.cards) {
+    if (!isValidKanbanCard(card, cardIds, columnIds)) {
+      throw Error('Nieprawidłowa karta zadania w tablicy Kanban.');
+    }
+    cardIds.add(card.id);
+  }
+
+  return kanban;
 }

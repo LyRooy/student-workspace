@@ -6,7 +6,14 @@
 //   env.PLANS      – bucket R2
 //   env.PLAN_TOKEN – sekret (min. 32 znaki), ustawiany przez `wrangler secret put PLAN_TOKEN`
 
-import { emptyPlan, validatePlan, resolvePlanKey } from './public/model.js';
+import {
+  emptyPlan,
+  validatePlan,
+  resolvePlanKey,
+  emptyKanban,
+  validateKanban,
+  resolveKanbanKey,
+} from './public/model.js';
 
 const MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 const MIN_TOKEN_LENGTH = 32;
@@ -76,55 +83,55 @@ async function readBodyWithLimit(request, maxBytes) {
 
 // --- Obsługa metod ------------------------------------------------------------
 
-async function getPlan(env, planKey) {
-  const object = await env.PLANS.get(planKey);
-  if (!object) return reply({ plan: emptyPlan(), etag: null });
+async function getDocument(env, objectKey, emptyFactory, payloadProp, label) {
+  const object = await env.PLANS.get(objectKey);
+  if (!object) return reply({ [payloadProp]: emptyFactory(), etag: null });
 
-  let plan;
+  let parsed;
   try {
-    plan = await object.json();
+    parsed = await object.json();
   } catch {
-    return error('Plan zapisany w R2 jest uszkodzony.', 500);
+    return error(`${label} zapisany w R2 jest uszkodzony.`, 500);
   }
-  return reply({ plan, etag: object.etag });
+  return reply({ [payloadProp]: parsed, etag: object.etag });
 }
 
-async function putPlan(request, env, planKey) {
+async function putDocument(request, env, objectKey, validator, label) {
   // Klient musi podać wersję: If-Match "<etag>" (aktualizacja) albo If-None-Match * (pierwszy zapis).
   const ifMatch = request.headers.get('If-Match');
   const ifNoneMatch = request.headers.get('If-None-Match');
   const isUpdate = ifMatch && ETAG_PATTERN.test(ifMatch) && !ifNoneMatch;
   const isCreate = !ifMatch && ifNoneMatch === '*';
-  if (!isUpdate && !isCreate) return error('Wymagana wersja planu.', 428);
+  if (!isUpdate && !isCreate) return error(`Wymagana wersja (${label}).`, 428);
 
   const contentType = request.headers.get('Content-Type') || '';
   if (!contentType.startsWith('application/json')) return error('Wymagany JSON.', 415);
 
   if (Number(request.headers.get('Content-Length')) > MAX_BYTES) {
-    return error('Plan jest zbyt duży (maks. 2 MB).', 413);
+    return error(`${label} jest zbyt duży (maks. 2 MB).`, 413);
   }
   if (!request.body) return error('Brak danych.', 400);
 
   const text = await readBodyWithLimit(request, MAX_BYTES);
-  if (text === null) return error('Plan jest zbyt duży (maks. 2 MB).', 413);
+  if (text === null) return error(`${label} jest zbyt duży (maks. 2 MB).`, 413);
 
-  let plan;
+  let validated;
   try {
-    plan = validatePlan(JSON.parse(text));
+    validated = validator(JSON.parse(text));
   } catch (e) {
     return error(e instanceof SyntaxError ? 'Nieprawidłowy JSON.' : e.message, 400);
   }
 
   // R2 sprawdza warunek atomowo — nie ma wyścigu między odczytem a zapisem.
   const onlyIf = new Headers(isUpdate ? { 'If-Match': ifMatch } : { 'If-None-Match': '*' });
-  const saved = await env.PLANS.put(planKey, JSON.stringify(plan), {
+  const saved = await env.PLANS.put(objectKey, JSON.stringify(validated), {
     onlyIf,
     httpMetadata: { contentType: 'application/json' },
   });
 
   if (!saved) {
     return error(
-      'Konflikt: w chmurze jest nowszy plan. Wyeksportuj lokalną kopię, a następnie pobierz aktualny plan.',
+      `Konflikt: w chmurze jest nowsza wersja (${label}). Wyeksportuj lokalną kopię, a następnie pobierz aktualne dane.`,
       409,
     );
   }
@@ -139,7 +146,9 @@ export default {
 
     // Wszystko poza /api/* to statyczny frontend.
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
-    if (url.pathname !== '/api/plan') return error('Nie znaleziono.', 404);
+    const isPlanRoute = url.pathname === '/api/plan';
+    const isKanbanRoute = url.pathname === '/api/kanban';
+    if (!isPlanRoute && !isKanbanRoute) return error('Nie znaleziono.', 404);
 
     if (!env.PLAN_TOKEN || env.PLAN_TOKEN.length < MIN_TOKEN_LENGTH) {
       return error('Skonfiguruj sekret PLAN_TOKEN (min. 32 znaki).', 503);
@@ -151,9 +160,10 @@ export default {
     const origin = request.headers.get('Origin');
     if (origin && origin !== url.origin) return error('Niedozwolone źródło żądania.', 403);
 
-    let planKey;
+    const rawId = url.searchParams.get('id');
+    let objectKey;
     try {
-      planKey = resolvePlanKey(url.searchParams.get('id'));
+      objectKey = isKanbanRoute ? resolveKanbanKey(rawId) : resolvePlanKey(rawId);
     } catch (e) {
       return error(e.message, 400);
     }
@@ -163,8 +173,21 @@ export default {
         console.error('Błąd: Brak powiązania R2 env.PLANS w konfiguracji Workera.');
         return error('Brak powiązania magazynu R2 (PLANS) w konfiguracji Workera.', 503);
       }
-      if (request.method === 'GET') return await getPlan(env, planKey);
-      if (request.method === 'PUT') return await putPlan(request, env, planKey);
+      if (isKanbanRoute) {
+        if (request.method === 'GET') {
+          return await getDocument(env, objectKey, emptyKanban, 'kanban', 'Plik tablicy Kanban');
+        }
+        if (request.method === 'PUT') {
+          return await putDocument(request, env, objectKey, validateKanban, 'Tablica Kanban');
+        }
+      } else {
+        if (request.method === 'GET') {
+          return await getDocument(env, objectKey, emptyPlan, 'plan', 'Plan');
+        }
+        if (request.method === 'PUT') {
+          return await putDocument(request, env, objectKey, validatePlan, 'Plan');
+        }
+      }
       return error('Dozwolone GET i PUT.', 405, { Allow: 'GET, PUT' });
     } catch (err) {
       console.error('Błąd operacji R2:', err);

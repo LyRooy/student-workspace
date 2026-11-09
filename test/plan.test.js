@@ -2,7 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
-import { emptyPlan, validatePlan, datesFor, monday, reconcileWithAcademicYear } from '../public/model.js';
+import {
+  emptyPlan,
+  validatePlan,
+  datesFor,
+  monday,
+  reconcileWithAcademicYear,
+  emptyKanban,
+  validateKanban,
+  resolveKanbanKey,
+} from '../public/model.js';
 import worker from '../worker.js';
 
 // --- Dane i atrapy -------------------------------------------------------------
@@ -369,4 +378,64 @@ test('API odrzuca niepoprawny JSON i nieznaną ścieżkę', async () => {
 
   const unknown = new Request('https://plan.example/api/other');
   assert.equal((await call(unknown, env)).status, 404);
+});
+
+test('walidacja tablicy Kanban i osobny endpoint /api/kanban (osobny plik JSON w R2)', async () => {
+  assert.equal(resolveKanbanKey(''), 'kanban.json');
+  assert.equal(resolveKanbanKey('default'), 'kanban.json');
+  assert.equal(resolveKanbanKey('Dawid'), 'kanban/dawid.json');
+
+  const board = emptyKanban();
+  board.cards.push({
+    id: 'card_1',
+    columnId: 'todo',
+    title: 'Sprawozdanie nr 2',
+    description: 'Policzyć metryki F1',
+    subjectName: 'Deep learning',
+    category: 'Laboratorium',
+    priority: 'high',
+    dueDate: '2026-11-20',
+    checklist: [{ id: 'chk_1', text: 'Wykresy', done: true }],
+    order: 0,
+  });
+  assert.equal(validateKanban(board).cards.length, 1);
+
+  // Karta z nieistniejącą kolumną jest odrzucana
+  const brokenBoard = structuredClone(board);
+  brokenBoard.cards[0].columnId = 'missing_col';
+  assert.throws(() => validateKanban(brokenBoard));
+
+  // Zapis i odczyt tablicy Kanban pod /api/kanban nie nadpisuje planu zajęć pod /api/plan
+  const env = createEnv();
+  await call(request('PUT', samplePlan(), { 'If-None-Match': '*' }), env);
+
+  const kanbanSave = await call(
+    new Request('https://plan.example/api/kanban', {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer ' + TOKEN,
+        'Content-Type': 'application/json',
+        'If-None-Match': '*',
+      },
+      body: JSON.stringify(board),
+    }),
+    env,
+  );
+  assert.equal(kanbanSave.status, 200);
+
+  const kanbanRead = await (
+    await call(
+      new Request('https://plan.example/api/kanban', {
+        method: 'GET',
+        headers: { Authorization: 'Bearer ' + TOKEN },
+      }),
+      env,
+    )
+  ).json();
+  assert.equal(kanbanRead.kanban.cards.length, 1);
+  assert.equal(kanbanRead.kanban.cards[0].title, 'Sprawozdanie nr 2');
+
+  // Plan zajęć w R2 pozostał całkowicie nienaruszony w osobnym obiekcie plan.json
+  const planRead = await (await call(request(), env)).json();
+  assert.equal(planRead.plan.events[0].type, 'Wykład');
 });

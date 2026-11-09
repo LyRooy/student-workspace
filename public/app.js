@@ -10,14 +10,19 @@ import {
   holidayFor,
   reconcileWithAcademicYear,
   resolvePlanKey,
+  emptyKanban,
+  validateKanban,
+  resolveKanbanKey,
 } from './model.js';
 
 // --- Stałe i stan ------------------------------------------------------------
 
 const STORAGE_KEY = 'student-calendar-v1';
+const KANBAN_STORAGE_KEY = 'student-kanban-v1';
 const TOKEN_KEY = 'student-calendar-token';
 const PLAN_ID_KEY = 'student-calendar-plan-id';
 const API_URL = '/api/plan'; // ten sam adres co frontend — Worker obsługuje oba
+const KANBAN_API_URL = '/api/kanban';
 const API_TIMEOUT_MS = 20_000;
 const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 const MIN_TOKEN_LENGTH = 32;
@@ -31,11 +36,20 @@ function weekdayIndex(date) {
 /** state.plan – dane planu, state.etag – wersja z chmury, state.dirty – niezsynchronizowane zmiany */
 let state = { plan: emptyPlan(), etag: null, dirty: false };
 let lastStored = null;       // ostatnia wartość zapisana przez tę kartę (wykrywanie innych kart)
+/** kanbanState.kanban – osobny obiekt tablicy Kanban zapisywany w osobnym pliku JSON */
+let kanbanState = { kanban: emptyKanban(), etag: null, dirty: false };
+let lastStoredKanban = null;
+let activeView = 'calendar'; // 'calendar' | 'kanban'
 let storageBlocked = false;  // localStorage niedostępny lub zmieniony przez inną kartę
 let busy = false;            // trwa synchronizacja
 let editMode = false;        // false = normalny tryb przeglądania, true = tryb edycji
 let editingId = null;        // id edytowanych zajęć (null = nowe)
 let detailsEventId = null;   // id zajęć aktualnie wyświetlanych w oknie szczegółów
+let editingKanbanCardId = null;
+let draftChecklist = [];     // robocza checklista w oknie edycji zadania Kanban
+let selectedKanbanColIndex = 0; // aktywna kolumna w widoku mobilnym tablicy Kanban
+let kanbanMobileSlideDir = '';
+let draggedKanbanCardId = null;
 let week = monday(today());  // poniedziałek wyświetlanego tygodnia
 let selectedDayIndex = weekdayIndex(today()); // 0..6 — aktywny dzień w widoku mobilnym (jak w USOS)
 let mobileSlideDir = '';     // 'slide-next' | 'slide-prev' | '' — kierunek animacji przełączania dnia na telefonie
@@ -122,12 +136,68 @@ function setStatus(message) {
 
 function reportState() {
   if (storageBlocked) {
-    setStatus('Nie można bezpiecznie zapisać danych lokalnych. Wyeksportuj plan i sprawdź pamięć przeglądarki.');
-  } else if (state.dirty) {
-    setStatus('Masz lokalne zmiany · Kliknij „Zapisz w chmurze”, aby nadpisać plan w chmurze i udostępnić go na innych urządzeniach.');
+    setStatus('Nie można bezpiecznie zapisać danych lokalnych. Wyeksportuj plik JSON i sprawdź pamięć przeglądarki.');
+    return;
+  }
+  if (activeView === 'kanban') {
+    if (kanbanState.dirty) {
+      setStatus(
+        'Masz lokalne zmiany w tablicy Kanban · Kliknij „Zapisz tablicę w chmurze”, aby zapisać osobny plik kanban.json w chmurze.',
+      );
+    } else {
+      setStatus(
+        'Tablica Kanban zapisana lokalnie (osobny plik kanban.json) · Pobierz z chmury, aby sprawdzić aktualną wersję.',
+      );
+    }
+    return;
+  }
+  if (state.dirty) {
+    setStatus('Masz lokalne zmiany · Kliknij „Zapisz plan w chmurze”, aby nadpisać plan w chmurze i udostępnić go na innych urządzeniach.');
   } else {
     setStatus('Plan zapisany lokalnie · Pobierz z chmury, aby sprawdzić aktualną wersję.');
   }
+}
+
+function updateViewToolbarAndHeader() {
+  const isKanban = activeView === 'kanban';
+
+  $('tabCalendar').classList.toggle('active', !isKanban);
+  $('tabCalendar').setAttribute('aria-selected', String(!isKanban));
+  $('tabKanban').classList.toggle('active', isKanban);
+  $('tabKanban').setAttribute('aria-selected', String(isKanban));
+
+  $('calendarView').hidden = isKanban;
+  $('kanbanView').hidden = !isKanban;
+
+  $('appHeading').innerHTML = isKanban ? 'Tablica Kanban<span>.</span>' : 'Plan zajęć<span>.</span>';
+
+  // Przyciski paska górnego zależne od aktywnej zakładki
+  $('editModeToggle').hidden = isKanban;
+  $('addEvent').hidden = isKanban || !editMode;
+  $('manageKanbanColsBtn').hidden = !isKanban;
+  $('addKanbanCardBtn').hidden = !isKanban;
+
+  // Przyciski w panelu narzędzi (#navPanel)
+  $('academicYearBtn').hidden = isKanban || !editMode;
+  $('bulkManageBtn').hidden = isKanban || !editMode;
+  $('clearKanbanDoneBtn').hidden = !isKanban;
+  $('resetKanbanBtn').hidden = !isKanban;
+
+  $('exportLabel').textContent = isKanban ? 'Eksport tablicy (.json)' : 'Eksport planu (.json)';
+  $('importLabel').textContent = isKanban ? 'Import tablicy (.json)' : 'Import planu (.json)';
+  $('pullLabel').textContent = isKanban ? 'Pobierz tablicę z chmury' : 'Pobierz plan z chmury';
+  $('pushLabel').textContent = isKanban ? 'Zapisz tablicę w chmurze' : 'Zapisz plan w chmurze';
+}
+
+function setActiveView(view) {
+  activeView = view === 'kanban' ? 'kanban' : 'calendar';
+  updateViewToolbarAndHeader();
+  if (activeView === 'kanban') {
+    renderKanban();
+  } else {
+    render();
+  }
+  reportState();
 }
 
 // --- Tryb przeglądania vs. Tryb edycji ---------------------------------------
@@ -140,9 +210,7 @@ function setEditMode(enabled) {
     ? '<i class="ph ph-pencil-simple-line"></i> <span class="btn-label">Tryb edycji: Wł.</span>'
     : '<i class="ph ph-pencil-simple"></i> <span class="btn-label">Tryb edycji: Wył.</span>';
 
-  $('addEvent').hidden = !editMode;
-  $('academicYearBtn').hidden = !editMode;
-  $('bulkManageBtn').hidden = !editMode;
+  updateViewToolbarAndHeader();
   $('calendarHint').textContent = editMode
     ? 'Tryb edycji aktywny: kliknij nagłówek dnia lub pusty dzień (poza dniami wolnymi), aby dodać zajęcia. Kliknij istniejące zajęcia, aby je edytować lub usunąć.'
     : 'Kliknij zajęcia, aby zobaczyć szczegóły przedmiotu i spotkania. Włącz „Tryb edycji” u góry, aby dodawać lub zmieniać zajęcia oraz edytować strukturę roku.';
@@ -171,6 +239,16 @@ function loadFromStorage() {
       validatePlan(saved.plan);
       state = { plan: saved.plan, etag: saved.etag ?? null, dirty: !!saved.dirty };
     }
+    lastStoredKanban = localStorage.getItem(KANBAN_STORAGE_KEY);
+    if (lastStoredKanban) {
+      const savedKanban = JSON.parse(lastStoredKanban);
+      validateKanban(savedKanban.kanban);
+      kanbanState = {
+        kanban: savedKanban.kanban,
+        etag: savedKanban.etag ?? null,
+        dirty: !!savedKanban.dirty,
+      };
+    }
   } catch {
     // Brak dostępu do localStorage lub uszkodzony wpis — blokujemy zapis, żeby niczego nie nadpisać.
     storageBlocked = true;
@@ -191,6 +269,20 @@ function persist(next) {
   state = next;
 }
 
+function persistKanban(next) {
+  if (storageBlocked) {
+    throw Error('Zapis lokalny jest zablokowany. Wyeksportuj tablicę Kanban przed przeładowaniem strony.');
+  }
+  if (localStorage.getItem(KANBAN_STORAGE_KEY) !== lastStoredKanban) {
+    throw Error('Inna karta zmieniła tablicę Kanban. Wyeksportuj swoją kopię i odśwież stronę.');
+  }
+
+  const encoded = JSON.stringify(next);
+  localStorage.setItem(KANBAN_STORAGE_KEY, encoded);
+  lastStoredKanban = encoded;
+  kanbanState = next;
+}
+
 /** Wykonuje zmianę na kopii planu, waliduje ją, zapisuje lokalnie i odświeża widok. */
 function mutate(change) {
   if (busy) throw Error('Poczekaj na zakończenie synchronizacji.');
@@ -202,6 +294,22 @@ function mutate(change) {
 
   persist(next);
   render();
+  renderKanbanBadge();
+  if (activeView === 'kanban') renderKanban();
+  reportState();
+}
+
+/** Wykonuje zmianę na kopii tablicy Kanban, waliduje ją, zapisuje lokalnie i odświeża widok. */
+function mutateKanban(change) {
+  if (busy) throw Error('Poczekaj na zakończenie synchronizacji.');
+
+  const next = clone(kanbanState);
+  change(next.kanban);
+  validateKanban(next.kanban);
+  next.dirty = true;
+
+  persistKanban(next);
+  renderKanban();
   reportState();
 }
 
@@ -1808,6 +1916,857 @@ function saveSpecialDay(event) {
   }
 }
 
+// --- Tablica Kanban (osobny plik kanban.json + chmura /api/kanban) -----------
+
+const PRIORITY_LABELS = {
+  high: 'Wysoki',
+  medium: 'Średni',
+  low: 'Niski',
+};
+
+const PRIORITY_WEIGHT = {
+  high: 0,
+  medium: 1,
+  low: 2,
+};
+
+function renderKanbanBadge() {
+  const badge = $('kanbanCountBadge');
+  if (!badge) return;
+  const cols = kanbanState.kanban.columns;
+  const lastColId = cols.length > 1 ? cols[cols.length - 1].id : null;
+  const activeCount = kanbanState.kanban.cards.filter((c) => c.columnId !== lastColId).length;
+  badge.textContent = String(activeCount);
+  badge.hidden = activeCount === 0;
+}
+
+function getDueDateStatus(dueDate, isDoneCol) {
+  if (!dueDate) return null;
+  const t = today();
+  const diffDays = Math.round((Date.parse(dueDate + 'T12:00:00Z') - Date.parse(t + 'T12:00:00Z')) / 86_400_000);
+  if (isDoneCol) {
+    return { label: formatDate(dueDate), variant: 'done', icon: 'ph-calendar-check' };
+  }
+  if (diffDays < 0) {
+    return {
+      label: `Po terminie (${formatDate(dueDate)})`,
+      variant: 'overdue',
+      icon: 'ph-warning-circle',
+    };
+  }
+  if (diffDays === 0) {
+    return { label: 'Dzisiaj!', variant: 'due-soon', icon: 'ph-alarm' };
+  }
+  if (diffDays === 1) {
+    return { label: 'Jutro', variant: 'due-soon', icon: 'ph-clock-countdown' };
+  }
+  if (diffDays <= 3) {
+    return { label: `Za ${diffDays} dni (${formatDate(dueDate)})`, variant: 'due-soon', icon: 'ph-clock' };
+  }
+  return { label: formatDate(dueDate), variant: 'normal', icon: 'ph-calendar-blank' };
+}
+
+function updateKanbanSubjectFilterOptions() {
+  const select = $('kanbanFilterSubject');
+  const prevValue = select.value;
+
+  const subjectSet = new Set();
+  for (const s of state.plan.subjects) {
+    if (s.name?.trim()) subjectSet.add(s.name.trim());
+  }
+  for (const c of kanbanState.kanban.cards) {
+    if (c.subjectName?.trim()) subjectSet.add(c.subjectName.trim());
+  }
+
+  select.replaceChildren();
+  const allOpt = node('option', '', 'Wszystkie przedmioty');
+  allOpt.value = '';
+  select.append(allOpt);
+
+  const noneOpt = node('option', '', 'Ogólne (bez przedmiotu)');
+  noneOpt.value = '__none__';
+  select.append(noneOpt);
+
+  for (const name of [...subjectSet].sort((a, b) => a.localeCompare(b, 'pl'))) {
+    const opt = node('option', '', name);
+    opt.value = name;
+    select.append(opt);
+  }
+
+  if (Array.from(select.options).some((o) => o.value === prevValue)) {
+    select.value = prevValue;
+  }
+}
+
+function getFilteredKanbanCards() {
+  const subjFilter = $('kanbanFilterSubject')?.value || '';
+  const prioFilter = $('kanbanFilterPriority')?.value || '';
+  const query = ($('kanbanSearch')?.value || '').trim().toLocaleLowerCase('pl');
+
+  return kanbanState.kanban.cards.filter((card) => {
+    if (subjFilter === '__none__' && card.subjectName) return false;
+    if (subjFilter && subjFilter !== '__none__' && (card.subjectName || '') !== subjFilter) return false;
+    if (prioFilter && card.priority !== prioFilter) return false;
+    if (query) {
+      const haystack = [
+        card.title,
+        card.description || '',
+        card.subjectName || '',
+        card.category || '',
+        ...(card.checklist || []).map((i) => i.text),
+      ]
+        .join(' ')
+        .toLocaleLowerCase('pl');
+      if (!haystack.includes(query)) return false;
+    }
+    return true;
+  });
+}
+
+function renderMobileKanbanTabs(filteredCards) {
+  const nav = $('mobileKanbanTabs');
+  nav.replaceChildren();
+
+  const cols = kanbanState.kanban.columns;
+  if (selectedKanbanColIndex >= cols.length) {
+    selectedKanbanColIndex = Math.max(0, cols.length - 1);
+  }
+
+  cols.forEach((col, idx) => {
+    const count = filteredCards.filter((c) => c.columnId === col.id).length;
+    let cls = 'mobile-day-tab';
+    if (idx === selectedKanbanColIndex) cls += ' active';
+
+    const btn = node('button', cls);
+    btn.type = 'button';
+    btn.append(
+      node('span', 'tab-code', col.title),
+      node('span', 'tab-num', `${count}`),
+    );
+    btn.onclick = () => {
+      if (selectedKanbanColIndex !== idx) {
+        kanbanMobileSlideDir = idx > selectedKanbanColIndex ? 'slide-next' : 'slide-prev';
+        selectedKanbanColIndex = idx;
+        renderKanban();
+      }
+    };
+    nav.append(btn);
+  });
+}
+
+function moveKanbanCardToColumn(cardId, targetColumnId, targetIndex = null) {
+  mutateKanban((kanban) => {
+    const card = kanban.cards.find((c) => c.id === cardId);
+    if (!card) return;
+    card.columnId = targetColumnId;
+
+    const colCards = kanban.cards
+      .filter((c) => c.columnId === targetColumnId && c.id !== cardId)
+      .sort((a, b) => a.order - b.order);
+
+    const insertAt =
+      targetIndex === null
+        ? colCards.length
+        : Math.max(0, Math.min(colCards.length, targetIndex));
+    colCards.splice(insertAt, 0, card);
+    colCards.forEach((c, idx) => {
+      c.order = idx;
+    });
+  });
+}
+
+function toggleKanbanChecklistItem(cardId, itemId) {
+  mutateKanban((kanban) => {
+    const card = kanban.cards.find((c) => c.id === cardId);
+    const item = card?.checklist?.find((i) => i.id === itemId);
+    if (item) item.done = !item.done;
+  });
+}
+
+function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
+  const el = node('article', `kanban-card priority-${card.priority}${isDoneCol ? ' is-done' : ''}`);
+  el.draggable = true;
+  el.dataset.cardId = card.id;
+
+  el.addEventListener('dragstart', (e) => {
+    draggedKanbanCardId = card.id;
+    el.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', card.id);
+  });
+  el.addEventListener('dragend', () => {
+    draggedKanbanCardId = null;
+    el.classList.remove('dragging');
+    for (const colEl of document.querySelectorAll('.kanban-col.drag-over')) {
+      colEl.classList.remove('drag-over');
+    }
+  });
+
+  // 1. Pasek plakietek na górze karty (Priorytet, Kategoria, Przedmiot)
+  const badgesRow = node('div', 'kanban-card-badges');
+
+  const prioBadge = node('span', `kanban-prio-badge priority-${card.priority}`);
+  const prioIcon =
+    card.priority === 'high'
+      ? 'ph-fire'
+      : card.priority === 'medium'
+        ? 'ph-flag'
+        : 'ph-arrow-down-right';
+  prioBadge.innerHTML = `<i class="ph ${prioIcon}"></i>`;
+  prioBadge.append(node('span', '', PRIORITY_LABELS[card.priority] || 'Średni'));
+  badgesRow.append(prioBadge);
+
+  if (card.category) {
+    const typeVisual = getEventTypeVisual(card.category, false);
+    const catTag = node('span', `type-tag ${typeVisual.variant}`);
+    catTag.innerHTML = `<i class="ph ${typeVisual.icon}"></i>`;
+    catTag.append(node('span', '', card.category));
+    badgesRow.append(catTag);
+  }
+
+  if (card.subjectName) {
+    const subjBadge = node('span', 'kanban-subject-badge');
+    subjBadge.innerHTML = '<i class="ph ph-book-bookmark"></i>';
+    subjBadge.append(node('span', '', card.subjectName));
+    badgesRow.append(subjBadge);
+  }
+
+  el.append(badgesRow);
+
+  // 2. Tytuł zadania (kliknięcie otwiera edycję)
+  const titleBtn = node('button', 'kanban-card-title-btn', card.title);
+  titleBtn.type = 'button';
+  titleBtn.onclick = () => openKanbanCardDialog(card.id);
+  el.append(titleBtn);
+
+  // 3. Opis (jeśli podano)
+  if (card.description?.trim()) {
+    el.append(node('p', 'kanban-card-desc', card.description));
+  }
+
+  // 4. Interaktywna checklista podzadań bezpośrednio na karcie
+  if (card.checklist && card.checklist.length > 0) {
+    const doneCount = card.checklist.filter((i) => i.done).length;
+    const totalCount = card.checklist.length;
+    const pct = Math.round((doneCount / totalCount) * 100);
+
+    const checkWrap = node('div', 'kanban-card-checklist');
+    const progressHead = node('div', 'kanban-check-progress-head');
+    const checkLabel = node('span', 'kanban-check-count');
+    checkLabel.innerHTML = `<i class="ph ph-check-square-offset"></i> ${doneCount}/${totalCount}`;
+    const pctLabel = node('span', 'kanban-check-pct', `${pct}%`);
+    progressHead.append(checkLabel, pctLabel);
+
+    const progressBar = node('div', 'kanban-check-bar');
+    const progressFill = node('div', 'kanban-check-fill');
+    progressFill.style.width = `${pct}%`;
+    progressBar.append(progressFill);
+
+    const listEl = node('div', 'kanban-card-checkitems');
+    for (const item of card.checklist) {
+      const itemLabel = node('label', `kanban-card-checkitem${item.done ? ' done' : ''}`);
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = item.done;
+      cb.onchange = (e) => {
+        e.stopPropagation();
+        toggleKanbanChecklistItem(card.id, item.id);
+      };
+      itemLabel.append(cb, node('span', '', item.text));
+      listEl.append(itemLabel);
+    }
+
+    checkWrap.append(progressHead, progressBar, listEl);
+    el.append(checkWrap);
+  }
+
+  // 5. Stopka karty: termin wykonania + przyciski szybkiego przesuwania i edycji
+  const footer = node('div', 'kanban-card-foot');
+
+  const dueInfo = getDueDateStatus(card.dueDate, isDoneCol);
+  if (dueInfo) {
+    const dueBadge = node('span', `kanban-due-badge ${dueInfo.variant}`);
+    dueBadge.innerHTML = `<i class="ph ${dueInfo.icon}"></i>`;
+    dueBadge.append(node('span', '', dueInfo.label));
+    footer.append(dueBadge);
+  } else {
+    footer.append(node('span', 'kanban-due-empty', ''));
+  }
+
+  const actions = node('div', 'kanban-card-actions');
+  if (colIndex > 0) {
+    const prevCol = kanbanState.kanban.columns[colIndex - 1];
+    const leftBtn = node('button', 'kanban-icon-btn');
+    leftBtn.type = 'button';
+    leftBtn.title = `Przenieś do: ${prevCol.title}`;
+    leftBtn.setAttribute('aria-label', `Przenieś do: ${prevCol.title}`);
+    leftBtn.innerHTML = '<i class="ph ph-arrow-left"></i>';
+    leftBtn.onclick = (e) => {
+      e.stopPropagation();
+      moveKanbanCardToColumn(card.id, prevCol.id);
+    };
+    actions.append(leftBtn);
+  }
+
+  if (colIndex < totalCols - 1) {
+    const nextCol = kanbanState.kanban.columns[colIndex + 1];
+    const rightBtn = node('button', 'kanban-icon-btn');
+    rightBtn.type = 'button';
+    rightBtn.title = `Przenieś do: ${nextCol.title}`;
+    rightBtn.setAttribute('aria-label', `Przenieś do: ${nextCol.title}`);
+    rightBtn.innerHTML = '<i class="ph ph-arrow-right"></i>';
+    rightBtn.onclick = (e) => {
+      e.stopPropagation();
+      moveKanbanCardToColumn(card.id, nextCol.id);
+    };
+    actions.append(rightBtn);
+  }
+
+  const editBtn = node('button', 'kanban-icon-btn');
+  editBtn.type = 'button';
+  editBtn.title = 'Edytuj zadanie';
+  editBtn.setAttribute('aria-label', 'Edytuj zadanie');
+  editBtn.innerHTML = '<i class="ph ph-pencil-simple"></i>';
+  editBtn.onclick = (e) => {
+    e.stopPropagation();
+    openKanbanCardDialog(card.id);
+  };
+  actions.append(editBtn);
+
+  footer.append(actions);
+  el.append(footer);
+
+  return el;
+}
+
+function renderKanban() {
+  renderKanbanBadge();
+  updateKanbanSubjectFilterOptions();
+
+  const cols = kanbanState.kanban.columns;
+  const allCards = kanbanState.kanban.cards;
+  const filteredCards = getFilteredKanbanCards();
+
+  // Podsumowanie liczbowe nad tablicą
+  const summaryParts = cols.map((col) => {
+    const cnt = allCards.filter((c) => c.columnId === col.id).length;
+    return `${col.title}: ${cnt}`;
+  });
+  $('kanbanSummary').textContent = summaryParts.join(' · ') || 'Brak kolumn';
+
+  renderMobileKanbanTabs(filteredCards);
+
+  const board = $('kanbanBoard');
+  board.replaceChildren();
+  board.style.setProperty('--kanban-cols', String(Math.max(1, cols.length)));
+
+  const slideClass = kanbanMobileSlideDir;
+  kanbanMobileSlideDir = '';
+
+  cols.forEach((col, colIndex) => {
+    const isLastCol = cols.length > 1 && colIndex === cols.length - 1;
+    let colClass = 'kanban-col';
+    if (colIndex === selectedKanbanColIndex) {
+      colClass += ' mobile-active';
+      if (slideClass) colClass += ` ${slideClass}`;
+    }
+    if (isLastCol) colClass += ' is-done-col';
+
+    const colEl = node('section', colClass);
+    colEl.dataset.columnId = col.id;
+
+    // Nagłówek kolumny
+    const head = node('div', 'kanban-col-head');
+    const titleWrap = node('div', 'kanban-col-title-wrap');
+    const colIcon =
+      colIndex === 0
+        ? 'ph-circle-dashed'
+        : isLastCol
+          ? 'ph-check-circle'
+          : 'ph-spinner-gap';
+    const iconEl = node('i', `ph ${colIcon}`);
+    const titleEl = node('h3', 'kanban-col-title', col.title);
+    const colCards = filteredCards
+      .filter((c) => c.columnId === col.id)
+      .sort((a, b) => a.order - b.order || (PRIORITY_WEIGHT[a.priority] ?? 1) - (PRIORITY_WEIGHT[b.priority] ?? 1));
+    const countBadge = node('span', 'kanban-col-count', String(colCards.length));
+    titleWrap.append(iconEl, titleEl, countBadge);
+
+    const addBtn = node('button', 'kanban-col-add-btn');
+    addBtn.type = 'button';
+    addBtn.title = `Dodaj zadanie w kolumnie „${col.title}”`;
+    addBtn.innerHTML = '<i class="ph ph-plus"></i>';
+    addBtn.onclick = () => openKanbanCardDialog(null, col.id);
+
+    head.append(titleWrap, addBtn);
+    colEl.append(head);
+
+    // Lista kart w kolumnie + obsługa Drag & Drop
+    const cardsContainer = node('div', 'kanban-cards');
+
+    colEl.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      colEl.classList.add('drag-over');
+    });
+    colEl.addEventListener('dragleave', (e) => {
+      if (!colEl.contains(e.relatedTarget)) {
+        colEl.classList.remove('drag-over');
+      }
+    });
+    colEl.addEventListener('drop', (e) => {
+      e.preventDefault();
+      colEl.classList.remove('drag-over');
+      const cardId = draggedKanbanCardId || e.dataTransfer.getData('text/plain');
+      if (!cardId) return;
+
+      // Wyznacz indeks docelowy na podstawie pozycji kursora Y względem kart w kolumnie
+      const cardElements = [...cardsContainer.querySelectorAll('.kanban-card:not(.dragging)')];
+      let targetIdx = cardElements.length;
+      for (let i = 0; i < cardElements.length; i++) {
+        const rect = cardElements[i].getBoundingClientRect();
+        if (e.clientY < rect.top + rect.height / 2) {
+          targetIdx = i;
+          break;
+        }
+      }
+      moveKanbanCardToColumn(cardId, col.id, targetIdx);
+    });
+
+    if (!colCards.length) {
+      const emptyBtn = node('button', 'kanban-empty-col');
+      emptyBtn.type = 'button';
+      emptyBtn.innerHTML = '<i class="ph ph-plus-circle"></i><span>Brak zadań · Kliknij, aby dodać</span>';
+      emptyBtn.onclick = () => openKanbanCardDialog(null, col.id);
+      cardsContainer.append(emptyBtn);
+    } else {
+      for (const card of colCards) {
+        cardsContainer.append(renderKanbanCard(card, colIndex, cols.length, isLastCol));
+      }
+    }
+
+    colEl.append(cardsContainer);
+    board.append(colEl);
+  });
+}
+
+// --- Okno dodawania / edycji zadania Kanban ----------------------------------
+
+const KANBAN_CUSTOM_SUBJECT = '__custom_subject__';
+const KANBAN_CUSTOM_CATEGORY = '__custom__';
+
+function populateKanbanCardFormSelects(selectedSubject = '', selectedCategory = 'Projekt', selectedColumnId = '') {
+  // 1. Kolumny
+  const colSelect = $('kanbanCardColumn');
+  colSelect.replaceChildren();
+  for (const col of kanbanState.kanban.columns) {
+    const opt = node('option', '', col.title);
+    opt.value = col.id;
+    colSelect.append(opt);
+  }
+  if (selectedColumnId && kanbanState.kanban.columns.some((c) => c.id === selectedColumnId)) {
+    colSelect.value = selectedColumnId;
+  }
+
+  // 2. Przedmiot (z planu zajęć lub własny)
+  const subjSelect = $('kanbanCardSubjectSelect');
+  const subjCustom = $('kanbanCardSubjectCustom');
+  subjSelect.replaceChildren();
+
+  const noneOpt = node('option', '', '— Ogólne / bez przedmiotu —');
+  noneOpt.value = '';
+  subjSelect.append(noneOpt);
+
+  const knownSubjectNames = new Set();
+  for (const s of state.plan.subjects) {
+    if (s.name?.trim()) knownSubjectNames.add(s.name.trim());
+  }
+  for (const c of kanbanState.kanban.cards) {
+    if (c.subjectName?.trim()) knownSubjectNames.add(c.subjectName.trim());
+  }
+
+  for (const name of [...knownSubjectNames].sort((a, b) => a.localeCompare(b, 'pl'))) {
+    const opt = node('option', '', name);
+    opt.value = name;
+    subjSelect.append(opt);
+  }
+
+  const customSubjOpt = node('option', '', '✎ Inny przedmiot / projekt (wpisz)...');
+  customSubjOpt.value = KANBAN_CUSTOM_SUBJECT;
+  subjSelect.append(customSubjOpt);
+
+  if (!selectedSubject) {
+    subjSelect.value = '';
+    subjCustom.value = '';
+    subjCustom.hidden = true;
+    subjCustom.required = false;
+  } else if (knownSubjectNames.has(selectedSubject)) {
+    subjSelect.value = selectedSubject;
+    subjCustom.value = '';
+    subjCustom.hidden = true;
+    subjCustom.required = false;
+  } else {
+    subjSelect.value = KANBAN_CUSTOM_SUBJECT;
+    subjCustom.value = selectedSubject;
+    subjCustom.hidden = false;
+    subjCustom.required = true;
+  }
+
+  // 3. Kategoria zadania
+  const catSelect = $('kanbanCardCategorySelect');
+  const catCustom = $('kanbanCardCategoryCustom');
+  const matchingCat = Array.from(catSelect.options).find(
+    (o) => o.value !== KANBAN_CUSTOM_CATEGORY && o.value.toLowerCase() === (selectedCategory || '').toLowerCase(),
+  );
+  if (matchingCat) {
+    catSelect.value = matchingCat.value;
+    catCustom.value = '';
+    catCustom.hidden = true;
+    catCustom.required = false;
+  } else {
+    catSelect.value = KANBAN_CUSTOM_CATEGORY;
+    catCustom.value = selectedCategory || '';
+    catCustom.hidden = false;
+    catCustom.required = true;
+  }
+}
+
+function updateKanbanSubjectSelectFields() {
+  const isCustom = $('kanbanCardSubjectSelect').value === KANBAN_CUSTOM_SUBJECT;
+  const input = $('kanbanCardSubjectCustom');
+  input.hidden = !isCustom;
+  input.required = isCustom;
+  if (isCustom) input.focus();
+}
+
+function updateKanbanCategorySelectFields() {
+  const isCustom = $('kanbanCardCategorySelect').value === KANBAN_CUSTOM_CATEGORY;
+  const input = $('kanbanCardCategoryCustom');
+  input.hidden = !isCustom;
+  input.required = isCustom;
+  if (isCustom) input.focus();
+}
+
+function renderDraftChecklist() {
+  const container = $('kanbanChecklistItems');
+  container.replaceChildren();
+
+  draftChecklist.forEach((item, idx) => {
+    const row = node('div', 'kanban-draft-checkrow');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = item.done;
+    cb.onchange = () => {
+      item.done = cb.checked;
+    };
+
+    const textInput = document.createElement('input');
+    textInput.type = 'text';
+    textInput.value = item.text;
+    textInput.maxLength = 200;
+    textInput.oninput = () => {
+      item.text = textInput.value;
+    };
+
+    const removeBtn = node('button', 'danger kanban-icon-btn');
+    removeBtn.type = 'button';
+    removeBtn.title = 'Usuń podpunkt';
+    removeBtn.innerHTML = '<i class="ph ph-x"></i>';
+    removeBtn.onclick = () => {
+      draftChecklist.splice(idx, 1);
+      renderDraftChecklist();
+    };
+
+    row.append(cb, textInput, removeBtn);
+    container.append(row);
+  });
+}
+
+function addDraftChecklistItem() {
+  const input = $('kanbanNewCheckItem');
+  const text = input.value.trim();
+  if (!text) return;
+  if (draftChecklist.length >= 50) {
+    $('kanbanCardError').textContent = 'Maksymalnie 50 podzadań na jednej karcie.';
+    return;
+  }
+  draftChecklist.push({ id: uid(), text, done: false });
+  input.value = '';
+  renderDraftChecklist();
+  input.focus();
+}
+
+function openKanbanCardDialog(cardId = null, defaultColumnId = null) {
+  if (busy) return;
+  editingKanbanCardId = cardId || null;
+  const card = kanbanState.kanban.cards.find((c) => c.id === cardId);
+
+  $('kanbanCardForm').reset();
+  $('kanbanCardError').textContent = '';
+  $('kanbanNewCheckItem').value = '';
+
+  const fallbackColId =
+    defaultColumnId ||
+    kanbanState.kanban.columns[selectedKanbanColIndex]?.id ||
+    kanbanState.kanban.columns[0]?.id;
+
+  if (card) {
+    $('kanbanCardDialogTitle').textContent = 'Edytuj zadanie';
+    $('kanbanCardTitleInput').value = card.title;
+    $('kanbanCardPriority').value = card.priority || 'medium';
+    $('kanbanCardDueDate').value = card.dueDate || '';
+    $('kanbanCardDesc').value = card.description || '';
+    populateKanbanCardFormSelects(card.subjectName || '', card.category ?? '', card.columnId);
+    draftChecklist = clone(card.checklist || []);
+    $('deleteKanbanCardBtn').hidden = false;
+  } else {
+    $('kanbanCardDialogTitle').textContent = 'Dodaj zadanie';
+    $('kanbanCardPriority').value = 'medium';
+    $('kanbanCardDueDate').value = '';
+    $('kanbanCardDesc').value = '';
+    const activeFilterSubj = $('kanbanFilterSubject')?.value || '';
+    const initialSubj = activeFilterSubj && activeFilterSubj !== '__none__' ? activeFilterSubj : '';
+    populateKanbanCardFormSelects(initialSubj, 'Projekt', fallbackColId);
+    draftChecklist = [];
+    $('deleteKanbanCardBtn').hidden = true;
+  }
+
+  renderDraftChecklist();
+  showDialogModal($('kanbanCardDialog'));
+}
+
+function saveKanbanCard(event) {
+  event.preventDefault();
+  try {
+    // Jeśli użytkownik wpisał tekst podzadania i od razu kliknął „Zapisz zadanie”, dołączamy je
+    const pendingCheck = $('kanbanNewCheckItem').value.trim();
+    if (pendingCheck && draftChecklist.length < 50) {
+      draftChecklist.push({ id: uid(), text: pendingCheck, done: false });
+      $('kanbanNewCheckItem').value = '';
+    }
+
+    const title = $('kanbanCardTitleInput').value.trim();
+    if (!title) throw Error('Podaj tytuł zadania.');
+
+    const columnId = $('kanbanCardColumn').value;
+    const priority = $('kanbanCardPriority').value;
+    const dueDate = $('kanbanCardDueDate').value.trim();
+    const description = $('kanbanCardDesc').value.trim();
+
+    const subjVal = $('kanbanCardSubjectSelect').value;
+    const subjectName =
+      subjVal === KANBAN_CUSTOM_SUBJECT ? $('kanbanCardSubjectCustom').value.trim() : subjVal.trim();
+
+    const catVal = $('kanbanCardCategorySelect').value;
+    const category =
+      catVal === KANBAN_CUSTOM_CATEGORY ? $('kanbanCardCategoryCustom').value.trim() : catVal.trim();
+
+    const checklist = draftChecklist
+      .map((item) => ({ id: item.id || uid(), text: item.text.trim(), done: !!item.done }))
+      .filter((item) => item.text.length > 0);
+
+    mutateKanban((kanban) => {
+      if (editingKanbanCardId) {
+        const existing = kanban.cards.find((c) => c.id === editingKanbanCardId);
+        if (!existing) return;
+        const colChanged = existing.columnId !== columnId;
+        existing.title = title;
+        existing.columnId = columnId;
+        existing.priority = priority;
+        existing.dueDate = dueDate;
+        existing.description = description;
+        existing.subjectName = subjectName;
+        existing.category = category;
+        existing.checklist = checklist;
+        if (colChanged) {
+          const sameCol = kanban.cards.filter((c) => c.columnId === columnId && c.id !== existing.id);
+          existing.order = sameCol.length;
+        }
+      } else {
+        const sameCol = kanban.cards.filter((c) => c.columnId === columnId);
+        kanban.cards.push({
+          id: uid(),
+          columnId,
+          title,
+          description,
+          subjectName,
+          category,
+          priority,
+          dueDate,
+          checklist,
+          order: sameCol.length,
+        });
+      }
+    });
+
+    $('kanbanCardDialog').close();
+  } catch (err) {
+    $('kanbanCardError').textContent = err.message;
+  }
+}
+
+function deleteKanbanCard() {
+  if (!editingKanbanCardId) return;
+  if (!confirm('Czy na pewno usunąć to zadanie z tablicy Kanban?')) return;
+  try {
+    mutateKanban((kanban) => {
+      kanban.cards = kanban.cards.filter((c) => c.id !== editingKanbanCardId);
+    });
+    $('kanbanCardDialog').close();
+  } catch (err) {
+    $('kanbanCardError').textContent = err.message;
+  }
+}
+
+// --- Zarządzanie kolumnami i czyszczenie tablicy Kanban ----------------------
+
+function renderKanbanColumnsList() {
+  const container = $('kanbanColumnsList');
+  container.replaceChildren();
+
+  const cols = kanbanState.kanban.columns;
+  cols.forEach((col, idx) => {
+    const count = kanbanState.kanban.cards.filter((c) => c.columnId === col.id).length;
+    const row = node('div', 'seriesrow');
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = col.title;
+    input.maxLength = 60;
+    input.ariaLabel = 'Nazwa kolumny';
+    input.onchange = () => {
+      const nextTitle = input.value.trim();
+      if (!nextTitle) {
+        input.value = col.title;
+        return;
+      }
+      try {
+        mutateKanban((kanban) => {
+          const target = kanban.columns.find((c) => c.id === col.id);
+          if (target) target.title = nextTitle;
+        });
+        renderKanbanColumnsList();
+      } catch (err) {
+        $('kanbanColumnsError').textContent = err.message;
+      }
+    };
+
+    const actions = node('div', 'actions');
+
+    if (idx > 0) {
+      const upBtn = node('button', 'kanban-icon-btn');
+      upBtn.type = 'button';
+      upBtn.title = 'Przesuń w lewo / wyżej';
+      upBtn.innerHTML = '<i class="ph ph-arrow-up"></i>';
+      upBtn.onclick = () => {
+        mutateKanban((kanban) => {
+          const temp = kanban.columns[idx - 1];
+          kanban.columns[idx - 1] = kanban.columns[idx];
+          kanban.columns[idx] = temp;
+        });
+        renderKanbanColumnsList();
+      };
+      actions.append(upBtn);
+    }
+
+    if (idx < cols.length - 1) {
+      const downBtn = node('button', 'kanban-icon-btn');
+      downBtn.type = 'button';
+      downBtn.title = 'Przesuń w prawo / niżej';
+      downBtn.innerHTML = '<i class="ph ph-arrow-down"></i>';
+      downBtn.onclick = () => {
+        mutateKanban((kanban) => {
+          const temp = kanban.columns[idx + 1];
+          kanban.columns[idx + 1] = kanban.columns[idx];
+          kanban.columns[idx] = temp;
+        });
+        renderKanbanColumnsList();
+      };
+      actions.append(downBtn);
+    }
+
+    const delBtn = node('button', 'danger', count > 0 ? `Zajęta (${count})` : 'Usuń');
+    delBtn.type = 'button';
+    delBtn.disabled = cols.length <= 1 || count > 0;
+    delBtn.onclick = () => {
+      try {
+        mutateKanban((kanban) => {
+          kanban.columns = kanban.columns.filter((c) => c.id !== col.id);
+        });
+        renderKanbanColumnsList();
+      } catch (err) {
+        $('kanbanColumnsError').textContent = err.message;
+      }
+    };
+    actions.append(delBtn);
+
+    row.append(input, actions);
+    container.append(row);
+  });
+}
+
+function openKanbanColumnsDialog() {
+  $('kanbanColumnsError').textContent = '';
+  $('newKanbanColumnTitle').value = '';
+  renderKanbanColumnsList();
+  showDialogModal($('kanbanColumnsDialog'));
+}
+
+function addKanbanColumn(event) {
+  event.preventDefault();
+  try {
+    const title = $('newKanbanColumnTitle').value.trim();
+    if (!title) return;
+    mutateKanban((kanban) => {
+      if (kanban.columns.length >= 12) {
+        throw Error('Maksymalnie 12 kolumn w tablicy Kanban.');
+      }
+      kanban.columns.push({ id: uid(), title });
+    });
+    $('newKanbanColumnTitle').value = '';
+    $('kanbanColumnsError').textContent = '';
+    renderKanbanColumnsList();
+  } catch (err) {
+    $('kanbanColumnsError').textContent = err.message;
+  }
+}
+
+function clearKanbanDone() {
+  const cols = kanbanState.kanban.columns;
+  if (!cols.length) return;
+  const doneCol = cols[cols.length - 1];
+  const doneCards = kanbanState.kanban.cards.filter((c) => c.columnId === doneCol.id);
+  if (!doneCards.length) {
+    setStatus(`W kolumnie „${doneCol.title}” nie ma żadnych ukończonych zadań do usunięcia.`);
+    return;
+  }
+  if (
+    !confirm(
+      `Usunąć wszystkie zadania (${doneCards.length}) z kolumny „${doneCol.title}”?`,
+    )
+  ) {
+    return;
+  }
+  mutateKanban((kanban) => {
+    kanban.cards = kanban.cards.filter((c) => c.columnId !== doneCol.id);
+  });
+  setStatus(`Usunięto ${doneCards.length} ukończonych zadań z kolumny „${doneCol.title}”.`);
+}
+
+function resetKanbanBoard() {
+  if (
+    !confirm(
+      'Czy na pewno wyczyścić całą tablicę Kanban do domyślnych 3 kolumn i usunąć wszystkie zadania?',
+    )
+  ) {
+    return;
+  }
+  mutateKanban((kanban) => {
+    Object.assign(kanban, emptyKanban());
+  });
+  setStatus('Tablica Kanban została zresetowana. Kliknij „Zapisz tablicę w chmurze”, jeśli chcesz nadpisać też plik kanban.json w chmurze.');
+}
+
 // --- Nawigacja po tygodniach -------------------------------------------------
 
 function showWeek(newWeek) {
@@ -1815,32 +2774,61 @@ function showWeek(newWeek) {
   render();
 }
 
-// --- Import / eksport --------------------------------------------------------
+// --- Import / eksport (osobny plik dla Planu i osobny dla tablicy Kanban) ---
 
-function exportPlan() {
-  const json = JSON.stringify(state.plan, null, 2);
+function exportActiveView() {
+  const isKanban = activeView === 'kanban';
+  const payload = isKanban ? kanbanState.kanban : state.plan;
+  const filename = isKanban ? `kanban-${today()}.json` : `plan-${today()}.json`;
+
+  const json = JSON.stringify(payload, null, 2);
   const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
 
   const link = node('a');
   link.href = url;
-  link.download = `plan-${today()}.json`;
+  link.download = filename;
   link.click();
 
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function importPlan() {
+async function importActiveView() {
   const input = $('import');
   const file = input.files[0];
   try {
     if (!file) return;
     if (file.size > MAX_IMPORT_BYTES) throw Error('Maksymalny rozmiar pliku to 2 MB.');
 
-    const plan = validatePlan(JSON.parse(await file.text()));
-    if (!confirm('Zastąpić lokalny plan danymi z pliku? W razie potrzeby najpierw wyeksportuj obecną kopię.')) {
-      return;
+    const parsed = JSON.parse(await file.text());
+
+    // Automatyczne rozpoznanie, czy użytkownik wgrywa plik tablicy Kanban czy plik planu zajęć
+    const looksLikeKanban = Array.isArray(parsed?.columns) && Array.isArray(parsed?.cards);
+
+    if (looksLikeKanban || activeView === 'kanban') {
+      const kanban = validateKanban(parsed);
+      if (
+        !confirm(
+          'Zastąpić lokalną tablicę Kanban danymi z pliku JSON? W razie potrzeby najpierw wyeksportuj obecną kopię.',
+        )
+      ) {
+        return;
+      }
+      if (activeView !== 'kanban') setActiveView('kanban');
+      mutateKanban((current) => Object.assign(current, kanban));
+      setStatus('Zaimportowano tablicę Kanban z pliku JSON.');
+    } else {
+      const plan = validatePlan(parsed);
+      if (
+        !confirm(
+          'Zastąpić lokalny plan zajęć danymi z pliku JSON? W razie potrzeby najpierw wyeksportuj obecną kopię.',
+        )
+      ) {
+        return;
+      }
+      if (activeView !== 'calendar') setActiveView('calendar');
+      mutate((current) => Object.assign(current, plan));
+      setStatus('Zaimportowano plan zajęć z pliku JSON.');
     }
-    mutate((current) => Object.assign(current, plan));
   } catch (err) {
     setStatus(err instanceof SyntaxError ? 'Plik nie jest prawidłowym JSON-em.' : err.message);
   } finally {
@@ -1880,8 +2868,9 @@ function saveConnection(event) {
   event.preventDefault();
   try {
     const rawPlanId = $('planId').value.trim().toLowerCase();
-    // Walidacja formatu nazwy/ID planu
+    // Walidacja formatu nazwy/ID dla planu i tablicy Kanban
     resolvePlanKey(rawPlanId);
+    resolveKanbanKey(rawPlanId);
 
     const token = $('token').value.trim();
     if (token && token.length < MIN_TOKEN_LENGTH) {
@@ -1899,13 +2888,19 @@ function saveConnection(event) {
       const next = clone(state);
       next.etag = null;
       persist(next);
+
+      const nextKanban = clone(kanbanState);
+      nextKanban.etag = null;
+      persistKanban(nextKanban);
     }
 
     updateConnectionButtonLabel();
     $('connectionError').textContent = '';
     $('connectionDialog').close();
     const label = rawPlanId || 'domyślny';
-    setStatus(`Zapisano ustawienia chmury (plan: ${label}). Możesz teraz pobrać lub zapisać plan w chmurze.`);
+    setStatus(
+      `Zapisano ustawienia chmury (ID: ${label}). Plan zapisuje się w osobnym pliku JSON, a tablica Kanban w osobnym pliku kanban.json.`,
+    );
   } catch (err) {
     $('connectionError').textContent = err.message;
   }
@@ -1915,17 +2910,22 @@ function setButtonsDisabled(disabled) {
   for (const button of document.querySelectorAll('button')) button.disabled = disabled;
 }
 
-/** Wysyła żądanie do Workera. direction: 'pull' (GET) lub 'push' (PUT). */
-async function callApi(direction, token, planId, overrideEtag = undefined) {
-  const url = planId ? `${API_URL}?id=${encodeURIComponent(planId)}` : API_URL;
+/** Wysyła żądanie do Workera (/api/plan lub /api/kanban). direction: 'pull' (GET) lub 'push' (PUT). */
+async function callApi(direction, token, planId, target = 'plan', overrideEtag = undefined) {
+  const isKanban = target === 'kanban';
+  const baseUrl = isKanban ? KANBAN_API_URL : API_URL;
+  const url = planId ? `${baseUrl}?id=${encodeURIComponent(planId)}` : baseUrl;
   const headers = { Authorization: 'Bearer ' + token };
   const options = { method: 'GET', headers, cache: 'no-store', signal: AbortSignal.timeout(API_TIMEOUT_MS) };
 
+  const currentObj = isKanban ? kanbanState.kanban : state.plan;
+  const currentEtag = isKanban ? kanbanState.etag : state.etag;
+
   if (direction === 'push') {
     options.method = 'PUT';
-    options.body = JSON.stringify(state.plan);
+    options.body = JSON.stringify(currentObj);
     headers['Content-Type'] = 'application/json';
-    const etagToUse = overrideEtag !== undefined ? overrideEtag : state.etag;
+    const etagToUse = overrideEtag !== undefined ? overrideEtag : currentEtag;
     if (etagToUse) headers['If-Match'] = `"${etagToUse}"`;
     else headers['If-None-Match'] = '*';
   }
@@ -1941,13 +2941,14 @@ async function callApi(direction, token, planId, overrideEtag = undefined) {
 
   if (direction === 'push' && response.status === 409 && overrideEtag === undefined) {
     const label = planId || 'domyślny';
+    const resourceName = isKanban ? 'tablicy Kanban' : 'planu';
     if (
       confirm(
-        `W chmurze dla planu „${label}” znajduje się już inna zapisana wersja. Czy chcesz ją nadpisać swoim obecnym planem lokalnym?`,
+        `W chmurze dla ${resourceName} „${label}” znajduje się już inna zapisana wersja. Czy chcesz ją nadpisać swoją obecną wersją lokalną?`,
       )
     ) {
-      const remote = await callApi('pull', token, planId);
-      return callApi('push', token, planId, remote.etag);
+      const remote = await callApi('pull', token, planId, target);
+      return callApi('push', token, planId, target, remote.etag);
     }
   }
 
@@ -1965,32 +2966,51 @@ async function sync(direction) {
     }
     const planId = getActivePlanId();
     const label = planId || 'domyślny';
+    const isKanban = activeView === 'kanban';
+    const target = isKanban ? 'kanban' : 'plan';
+    const isDirty = isKanban ? kanbanState.dirty : state.dirty;
+    const nounAcc = isKanban ? 'tablicę Kanban' : 'plan';
 
     if (
       direction === 'pull' &&
-      state.dirty &&
-      !confirm('Pobranie zastąpi niezapisane lokalne zmiany. Wyeksportuj je najpierw, jeśli chcesz je zachować. Kontynuować?')
+      isDirty &&
+      !confirm(
+        `Pobranie zastąpi niezapisane lokalne zmiany (${nounAcc}). Wyeksportuj je najpierw do pliku JSON, jeśli chcesz je zachować. Kontynuować?`,
+      )
     ) {
       return;
     }
 
     busy = true;
     setButtonsDisabled(true);
-    setStatus(direction === 'pull' ? `Pobieranie planu (${label})…` : `Zapisywanie planu (${label})…`);
+    setStatus(
+      direction === 'pull'
+        ? `Pobieranie: ${nounAcc} (${label})…`
+        : `Zapisywanie w chmurze: ${nounAcc} (${label})…`,
+    );
 
-    const data = await callApi(direction, token, planId);
+    const data = await callApi(direction, token, planId, target);
 
-    const next = clone(state);
-    if (direction === 'pull') next.plan = validatePlan(data.plan);
-    next.etag = data.etag;
-    next.dirty = false;
-    persist(next);
-
-    render();
-    setStatus(`Zsynchronizowano plan „${label}” · ${new Date().toLocaleTimeString('pl-PL')}.`);
+    if (isKanban) {
+      const next = clone(kanbanState);
+      if (direction === 'pull') next.kanban = validateKanban(data.kanban);
+      next.etag = data.etag;
+      next.dirty = false;
+      persistKanban(next);
+      renderKanban();
+      setStatus(`Zsynchronizowano tablicę Kanban „${label}” (kanban.json) · ${new Date().toLocaleTimeString('pl-PL')}.`);
+    } else {
+      const next = clone(state);
+      if (direction === 'pull') next.plan = validatePlan(data.plan);
+      next.etag = data.etag;
+      next.dirty = false;
+      persist(next);
+      render();
+      setStatus(`Zsynchronizowano plan „${label}” (plan.json) · ${new Date().toLocaleTimeString('pl-PL')}.`);
+    }
   } catch (err) {
     if (err.name === 'TimeoutError') {
-      setStatus('Przekroczono czas połączenia. Lokalny plan pozostał bez zmian.');
+      setStatus('Przekroczono czas połączenia. Dane lokalne pozostały bez zmian.');
     } else {
       setStatus(err.message + ' Lokalna kopia pozostaje dostępna.');
     }
@@ -2003,12 +3023,81 @@ async function sync(direction) {
 // --- Podpięcie zdarzeń -------------------------------------------------------
 
 function bindEvents() {
+  $('tabCalendar').onclick = () => setActiveView('calendar');
+  $('tabKanban').onclick = () => setActiveView('kanban');
+
   $('menuToggle').onclick = () => {
     const isOpen = $('navPanel').classList.contains('open');
     setMobileMenuOpen(!isOpen);
   };
   $('editModeToggle').onclick = () => setEditMode(!editMode);
   $('addEvent').onclick = () => openEventDialog(null, addDays(week, selectedDayIndex));
+
+  // Zdarzenia tablicy Kanban
+  $('addKanbanCardBtn').onclick = () => openKanbanCardDialog();
+  $('manageKanbanColsBtn').onclick = () => openKanbanColumnsDialog();
+  $('clearKanbanDoneBtn').onclick = () => {
+    setMobileMenuOpen(false);
+    clearKanbanDone();
+  };
+  $('resetKanbanBtn').onclick = () => {
+    setMobileMenuOpen(false);
+    resetKanbanBoard();
+  };
+  $('kanbanFilterSubject').onchange = renderKanban;
+  $('kanbanFilterPriority').onchange = renderKanban;
+  $('kanbanSearch').oninput = renderKanban;
+
+  $('kanbanCardSubjectSelect').onchange = updateKanbanSubjectSelectFields;
+  $('kanbanCardCategorySelect').onchange = updateKanbanCategorySelectFields;
+  $('addKanbanCheckItemBtn').onclick = addDraftChecklistItem;
+  $('kanbanNewCheckItem').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addDraftChecklistItem();
+    }
+  });
+  $('kanbanCardForm').onsubmit = saveKanbanCard;
+  $('deleteKanbanCardBtn').onclick = deleteKanbanCard;
+  $('kanbanColumnForm').onsubmit = addKanbanColumn;
+
+  // Przełączanie kolumn Kanban gestem swipe na telefonie
+  let kanbanTouchX = null;
+  let kanbanTouchY = null;
+  const kanbanBoardEl = $('kanbanBoard');
+  kanbanBoardEl.addEventListener(
+    'touchstart',
+    (e) => {
+      if (e.touches.length === 1 && window.innerWidth <= 768) {
+        kanbanTouchX = e.touches[0].clientX;
+        kanbanTouchY = e.touches[0].clientY;
+      }
+    },
+    { passive: true },
+  );
+  kanbanBoardEl.addEventListener(
+    'touchend',
+    (e) => {
+      if (kanbanTouchX === null || !e.changedTouches.length) return;
+      const dx = e.changedTouches[0].clientX - kanbanTouchX;
+      const dy = e.changedTouches[0].clientY - kanbanTouchY;
+      kanbanTouchX = null;
+      kanbanTouchY = null;
+      const totalCols = kanbanState.kanban.columns.length;
+      if (window.innerWidth <= 768 && totalCols > 1 && Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+        if (dx < 0 && selectedKanbanColIndex < totalCols - 1) {
+          kanbanMobileSlideDir = 'slide-next';
+          selectedKanbanColIndex++;
+          renderKanban();
+        } else if (dx > 0 && selectedKanbanColIndex > 0) {
+          kanbanMobileSlideDir = 'slide-prev';
+          selectedKanbanColIndex--;
+          renderKanban();
+        }
+      }
+    },
+    { passive: true },
+  );
   $('subject').onchange = updateSubjectSelectionFields;
   $('typeSelect').onchange = updateTypeSelectFields;
   $('start').onchange = () => {
@@ -2191,13 +3280,13 @@ function bindEvents() {
 
   $('export').onclick = () => {
     setMobileMenuOpen(false);
-    exportPlan();
+    exportActiveView();
   };
   $('importButton').onclick = () => {
     setMobileMenuOpen(false);
     $('import').click();
   };
-  $('import').onchange = importPlan;
+  $('import').onchange = importActiveView;
 
   $('connection').onclick = () => {
     setMobileMenuOpen(false);
@@ -2209,7 +3298,7 @@ function bindEvents() {
 
   // Inna karta tej samej przeglądarki zmieniła dane — blokujemy edycję, żeby się nie nadpisywać.
   window.addEventListener('storage', (e) => {
-    if (e.key === STORAGE_KEY || e.key === null) {
+    if (e.key === STORAGE_KEY || e.key === KANBAN_STORAGE_KEY || e.key === null) {
       storageBlocked = true;
       setStatus('Inna karta zmieniła dane. Wyeksportuj swoją kopię i odśwież stronę przed dalszą edycją.');
     }
@@ -2221,5 +3310,6 @@ function bindEvents() {
 loadFromStorage();
 bindEvents();
 updateConnectionButtonLabel();
+renderKanbanBadge();
 setEditMode(false);
 reportState();
