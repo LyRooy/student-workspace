@@ -30,6 +30,10 @@
         </nav>
       </div>
       <div class="actions header-actions">
+        <div id="liveClockBadge" class="live-clock-badge" title="Aktualna godzina (na żywo)">
+          <span class="live-clock-dot"></span>
+          <span id="liveClockText">--:--</span>
+        </div>
         <button type="button" id="themeToggle" class="desktop-only"><i class="ph ph-circle-half"></i> Auto</button>
         <button type="button" id="editModeToggle" aria-pressed="false">
           <i class="ph ph-pencil-simple"></i> <span class="btn-label">Tryb edycji: Wył.</span>
@@ -193,13 +197,23 @@
         </dl>
 
         <div id="detailsNotesSection" class="details-section" hidden>
-          <h3>Notatka do tego spotkania</h3>
-          <p id="detailsNotes" class="details-text"></p>
+          <div class="details-section-head">
+            <h3>Notatka do tego spotkania</h3>
+            <button type="button" id="copyEventNotesBtn" class="copy-note-btn">
+              <i class="ph ph-copy"></i> <span>Kopiuj notatkę</span>
+            </button>
+          </div>
+          <div id="detailsNotes" class="details-text"></div>
         </div>
 
         <div id="detailsSubjectSection" class="details-section" hidden>
-          <h3>Szczegóły przedmiotu</h3>
-          <p id="detailsSubjectInfo" class="details-text"></p>
+          <div class="details-section-head">
+            <h3>Szczegóły przedmiotu</h3>
+            <button type="button" id="copySubjectDetailsBtn" class="copy-note-btn">
+              <i class="ph ph-copy"></i> <span>Kopiuj opis</span>
+            </button>
+          </div>
+          <div id="detailsSubjectInfo" class="details-text"></div>
         </div>
       </div>
 
@@ -567,6 +581,47 @@
       </form>
     </dialog>
 
+    <!-- Okno: szczegóły zadania na tablicy Kanban (w trybie przeglądania) -->
+    <dialog id="kanbanDetailsDialog">
+      <div class="dialoghead">
+        <div class="details-title-wrap">
+          <h2 id="kanbanDetailsTitle">Szczegóły zadania</h2>
+        </div>
+        <button type="button" data-close aria-label="Zamknij"><i class="ph ph-x"></i></button>
+      </div>
+
+      <div class="details-body">
+        <div class="details-badges">
+          <span id="kanbanDetailsColumn" class="details-badge"></span>
+          <span id="kanbanDetailsPriority" class="details-badge subtle"></span>
+          <span id="kanbanDetailsCategory" class="details-badge subtle" hidden></span>
+          <span id="kanbanDetailsSubject" class="details-badge subtle" hidden></span>
+          <span id="kanbanDetailsDue" class="details-badge subtle" hidden></span>
+        </div>
+
+        <div id="kanbanDetailsDescSection" class="details-section" hidden>
+          <div class="details-section-head">
+            <h3>Opis / notatki</h3>
+            <button type="button" id="copyKanbanDescBtn" class="copy-note-btn">
+              <i class="ph ph-copy"></i> <span>Kopiuj notatkę</span>
+            </button>
+          </div>
+          <div id="kanbanDetailsDesc" class="details-text"></div>
+        </div>
+
+        <div id="kanbanDetailsChecklistSection" class="details-section" hidden>
+          <h3 id="kanbanDetailsChecklistHead">Lista podzadań</h3>
+          <div id="kanbanDetailsChecklist" class="kanban-card-checkitems"></div>
+        </div>
+      </div>
+
+      <div class="dialogfoot">
+        <button type="button" id="kanbanDetailsEditBtn" class="primary">
+          <i class="ph ph-pencil-simple"></i> Edytuj zadanie
+        </button>
+      </div>
+    </dialog>
+
     <!-- Okno: dodawanie / edycja karty zadania na tablicy Kanban -->
     <dialog id="kanbanCardDialog">
       <form id="kanbanCardForm">
@@ -626,147 +681,6 @@
               <option value="Zadanie">Zadanie</option>
               <option value="">Bez kategorii</option>
               <option value="__custom__">Inna (wpisz własną)...</option>
-            </select>
-            <input
-              id="kanbanCardCategoryCustom"
-              maxlength="60"
-              placeholder="Wpisz własną kategorię..."
-              hidden
-            >
-          </label>
-        </div>
-
-        <label>
-          Termin wykonania / deadline (opcjonalnie)
-          <input id="kanbanCardDueDate" type="date" min="2000-01-01" max="2100-12-31">
-        </label>
-
-        <div class="kanban-checklist-editor">
-          <span class="field-label">Lista podzadań (checklista)</span>
-          <div id="kanbanChecklistItems" class="kanban-checklist-items"></div>
-          <div class="kanban-checklist-add">
-            <input
-              type="text"
-              id="kanbanNewCheckItem"
-              maxlength="200"
-              placeholder="Dodaj podpunkt (np. Przygotować wykresy)..."
-            >
-            <button type="button" id="addKanbanCheckItemBtn">
-              <i class="ph ph-plus"></i> Dodaj
-            </button>
-          </div>
-        </div>
-
-        <label>
-          Opis / notatki (opcjonalnie)
-          <textarea
-            id="kanbanCardDesc"
-            maxlength="2000"
-            placeholder="Szczegóły zadania, wymagania, linki..."
-          ></textarea>
-        </label>
-
-        <p id="kanbanCardError" class="error" role="alert"></p>
-
-        <div class="dialogfoot">
-          <button type="button" id="deleteKanbanCardBtn" class="danger" hidden>
-            <i class="ph ph-trash"></i> Usuń zadanie
-          </button>
-          <button type="submit" class="primary">Zapisz zadanie</button>
-        </div>
-      </form>
-    </dialog>
-
-    <!-- Okno: zarządzanie kolumnami tablicy Kanban -->
-    <dialog id="kanbanColumnsDialog">
-      <div class="dialoghead">
-        <h2>Kolumny tablicy Kanban</h2>
-        <button type="button" data-close aria-label="Zamknij"><i class="ph ph-x"></i></button>
-      </div>
-
-      <p class="hint">
-        Dostosuj kolumny swojej tablicy (maks. 12 kolumn). Nie można usunąć kolumny, w której znajdują się zadania — najpierw przenieś je do innej kolumny.
-      </p>
-
-      <div id="kanbanColumnsList" class="bulk-list"></div>
-
-      <form id="kanbanColumnForm" class="kanban-col-form">
-        <label>
-          Nowa kolumna
-          <div class="kanban-checklist-add">
-            <input
-              id="newKanbanColumnTitle"
-              required
-              maxlength="60"
-              placeholder="np. Do sprawdzenia, Pomysły, Czeka na ocenę..."
-            >
-            <button type="submit" class="primary">
-              <i class="ph ph-plus"></i> Dodaj kolumnę
-            </button>
-          </div>
-        </label>
-        <p id="kanbanColumnsError" class="error" role="alert"></p>
-      </form>
-    </dialog>
-
-    <!-- Okno: dodawanie / edycja karty zadania na tablicy Kanban -->
-    <dialog id="kanbanCardDialog">
-      <form id="kanbanCardForm">
-        <div class="dialoghead">
-          <h2 id="kanbanCardDialogTitle">Dodaj zadanie</h2>
-          <button type="button" data-close aria-label="Zamknij"><i class="ph ph-x"></i></button>
-        </div>
-
-        <label>
-          Tytuł zadania
-          <input
-            id="kanbanCardTitleInput"
-            required
-            maxlength="160"
-            placeholder="np. Oddać sprawozdanie nr 3 z Deep Learningu"
-          >
-        </label>
-
-        <div class="pair">
-          <label>
-            Kolumna (status)
-            <select id="kanbanCardColumn" required></select>
-          </label>
-          <label>
-            Priorytet
-            <select id="kanbanCardPriority">
-              <option value="low">Niski</option>
-              <option value="medium" selected>Średni</option>
-              <option value="high">Wysoki (pilne)</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="pair">
-          <label>
-            Przedmiot (opcjonalnie)
-            <select id="kanbanCardSubjectSelect"></select>
-            <input
-              id="kanbanCardSubjectCustom"
-              maxlength="120"
-              placeholder="Wpisz nazwę przedmiotu lub projektu..."
-              hidden
-            >
-          </label>
-          <label>
-            Kategoria zadania
-            <select id="kanbanCardCategorySelect">
-              <option value="Projekt">Projekt</option>
-              <option value="Laboratorium">Laboratorium / Sprawozdanie</option>
-              <option value="Zaliczenie / Kolokwium">Zaliczenie / Kolokwium</option>
-              <option value="Egzamin">Egzamin</option>
-              <option value="Egzamin poprawkowy / Poprawka">Poprawka</option>
-              <option value="Obrona projektu / pracy">Praca dyplomowa / Obrona</option>
-              <option value="Ćwiczenia">Zadanie domowe / Ćwiczenia</option>
-              <option value="Seminarium">Prezentacja / Seminarium</option>
-              <option value="Spotkanie">Spotkanie / Konsultacje</option>
-              <option value="">Bez kategorii</option>
-              <option value="__custom__">✎ Inna (wpisz własną)...</option>
             </select>
             <input
               id="kanbanCardCategoryCustom"

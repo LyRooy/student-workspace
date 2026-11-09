@@ -47,6 +47,7 @@ let editMode = false;        // false = normalny tryb przeglądania, true = tryb
 let editingId = null;        // id edytowanych zajęć (null = nowe)
 let detailsEventId = null;   // id zajęć aktualnie wyświetlanych w oknie szczegółów
 let editingKanbanCardId = null;
+let detailsKanbanCardId = null;
 let draftChecklist = [];     // robocza checklista w oknie edycji zadania Kanban
 let selectedKanbanColIndex = 0; // aktywna kolumna w widoku mobilnym tablicy Kanban
 let kanbanMobileSlideDir = '';
@@ -117,6 +118,77 @@ function node(tag, className, text) {
   return el;
 }
 
+const URL_REGEX = /(https?:\/\/[^\s<>"')]+)/gi;
+
+async function copyTextWithFeedback(text, btnEl, defaultLabel = null) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    if (btnEl) {
+      const prevHtml = btnEl.innerHTML;
+      btnEl.classList.add('copied');
+      btnEl.innerHTML = defaultLabel
+        ? '<i class="ph ph-check"></i> <span>Skopiowano!</span>'
+        : '<i class="ph ph-check"></i>';
+      setTimeout(() => {
+        btnEl.classList.remove('copied');
+        btnEl.innerHTML = prevHtml;
+      }, 1500);
+    }
+  } catch {
+    setStatus('Nie udało się automatycznie skopiować do schowka.');
+  }
+}
+
+/**
+ * Renderuje tekst notatki/opisu z automatycznym zamienianiem adresów URL (http/https)
+ * na klikalne odnośniki z przyciskiem „Kopiuj link” obok każdego linku.
+ */
+function renderRichTextWithLinks(container, rawText) {
+  container.replaceChildren();
+  const text = rawText || '';
+  if (!text) return;
+
+  let lastIdx = 0;
+  for (const match of text.matchAll(URL_REGEX)) {
+    const url = match[0];
+    const startIdx = match.index ?? 0;
+
+    if (startIdx > lastIdx) {
+      container.append(document.createTextNode(text.slice(lastIdx, startIdx)));
+    }
+
+    const chip = node('span', 'rich-link-chip');
+    const link = node('a', 'rich-link');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.draggable = false;
+    link.innerHTML = '<i class="ph ph-arrow-square-out"></i>';
+    link.append(node('span', 'rich-link-url', url));
+    link.onclick = (e) => e.stopPropagation();
+
+    const copyBtn = node('button', 'rich-link-copy');
+    copyBtn.type = 'button';
+    copyBtn.title = 'Kopiuj ten link do schowka';
+    copyBtn.setAttribute('aria-label', 'Kopiuj link');
+    copyBtn.innerHTML = '<i class="ph ph-copy"></i>';
+    copyBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      copyTextWithFeedback(url, copyBtn);
+    };
+
+    chip.append(link, copyBtn);
+    container.append(chip);
+    lastIdx = startIdx + url.length;
+  }
+
+  if (lastIdx < text.length) {
+    container.append(document.createTextNode(text.slice(lastIdx)));
+  }
+}
+
 const dayMonthFormat = new Intl.DateTimeFormat('pl-PL', { day: 'numeric', month: 'long' });
 const fullDateFormat = new Intl.DateTimeFormat('pl-PL', {
   weekday: 'long',
@@ -172,17 +244,17 @@ function updateViewToolbarAndHeader() {
 
   $('appHeading').innerHTML = isKanban ? 'Tablica Kanban<span>.</span>' : 'Plan zajęć<span>.</span>';
 
-  // Przyciski paska górnego zależne od aktywnej zakładki
-  $('editModeToggle').hidden = isKanban;
+  // Przyciski paska górnego zależne od aktywnej zakładki oraz trybu edycji
+  $('editModeToggle').hidden = false;
   $('addEvent').hidden = isKanban || !editMode;
-  $('manageKanbanColsBtn').hidden = !isKanban;
-  $('addKanbanCardBtn').hidden = !isKanban;
+  $('manageKanbanColsBtn').hidden = !isKanban || !editMode;
+  $('addKanbanCardBtn').hidden = !isKanban || !editMode;
 
   // Przyciski w panelu narzędzi (#navPanel)
   $('academicYearBtn').hidden = isKanban || !editMode;
   $('bulkManageBtn').hidden = isKanban || !editMode;
-  $('clearKanbanDoneBtn').hidden = !isKanban;
-  $('resetKanbanBtn').hidden = !isKanban;
+  $('clearKanbanDoneBtn').hidden = !isKanban || !editMode;
+  $('resetKanbanBtn').hidden = !isKanban || !editMode;
 
   $('exportLabel').textContent = isKanban ? 'Eksport tablicy (.json)' : 'Eksport planu (.json)';
   $('importLabel').textContent = isKanban ? 'Import tablicy (.json)' : 'Import planu (.json)';
@@ -217,7 +289,12 @@ function setEditMode(enabled) {
     ? 'Tryb edycji aktywny: kliknij nagłówek dnia lub pusty dzień (poza dniami wolnymi), aby dodać zajęcia. Kliknij istniejące zajęcia, aby je edytować lub usunąć.'
     : 'Kliknij zajęcia, aby zobaczyć szczegóły przedmiotu i spotkania. Włącz „Tryb edycji” u góry, aby dodawać lub zmieniać zajęcia oraz edytować strukturę roku.';
 
+  $('kanbanHint').innerHTML = editMode
+    ? 'Tryb edycji aktywny: przeciągaj karty między kolumnami (drag &amp; drop), odhaczaj podzadania lub kliknij kartę, aby ją edytować. Tablica zapisuje się w osobnym pliku <code>kanban.json</code>.'
+    : 'Kliknij zadanie, aby zobaczyć jego szczegóły. Włącz „Tryb edycji” u góry, aby dodawać zadania, zmieniać kolumny i przesuwać karty na tablicy Kanban.';
+
   render();
+  renderKanban();
 }
 
 function setMobileMenuOpen(open) {
@@ -622,7 +699,29 @@ function renderMobileDayTabs(weekEvents, specialDayMap) {
   }
 }
 
+function refreshSpecialDayMarquees() {
+  for (const outer of document.querySelectorAll('.special-day-label')) {
+    const inner = outer.querySelector('.special-day-label-inner');
+    if (!inner) continue;
+    outer.classList.remove('is-overflowing');
+    outer.style.removeProperty('--marquee-shift');
+    outer.style.removeProperty('--marquee-time');
+
+    const overflowPx = inner.scrollWidth - outer.clientWidth;
+    if (overflowPx > 3) {
+      const durationSec = Math.max(5.5, Math.min(14, overflowPx / 12 + 4));
+      outer.style.setProperty('--marquee-shift', `-${overflowPx + 6}px`);
+      outer.style.setProperty('--marquee-time', `${durationSec.toFixed(1)}s`);
+      outer.classList.add('is-overflowing');
+    }
+  }
+}
+
 function updateLiveTimeIndicator() {
+  const timeStr = nowTimeLabel();
+  const topClock = $('liveClockText');
+  if (topClock) topClock.textContent = timeStr;
+
   const currentToday = today();
   if (currentToday !== lastRenderedToday) {
     lastRenderedToday = currentToday;
@@ -631,24 +730,30 @@ function updateLiveTimeIndicator() {
   }
 
   const nowMin = nowMinutesFloat();
-  const timeStr = nowTimeLabel();
   const { startMin, endMin } = currentGridBounds;
 
   for (const line of document.querySelectorAll('[data-now-line]')) {
     const badge = line.querySelector('[data-now-badge]');
-    if (nowMin < startMin) {
-      line.classList.add('out-of-bounds');
-      line.style.top = '4px';
-      if (badge) badge.textContent = `Teraz · ${timeStr}`;
-    } else if (nowMin > endMin) {
-      line.classList.add('out-of-bounds');
-      line.style.top = 'calc(100% - 14px)';
-      if (badge) badge.textContent = `Teraz · ${timeStr}`;
+    const hasEvents = line.dataset.hasEvents === 'true';
+    const lastEndRaw = line.dataset.lastEndMin;
+    const lastEndMin = lastEndRaw ? Number(lastEndRaw) : null;
+    const allFinished = hasEvents && lastEndMin !== null && nowMin >= lastEndMin;
+    const outOfGrid = nowMin < startMin || nowMin >= endMin;
+
+    // Ukrywamy pasek na siatce, gdy zajęcia na dziś już się skończyły, dzień jest pusty lub jesteśmy poza siatką godzin
+    if (!hasEvents || allFinished || outOfGrid) {
+      line.hidden = true;
     } else {
-      line.classList.remove('out-of-bounds');
+      line.hidden = false;
       const topPx = ((nowMin - startMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX;
       line.style.top = `${topPx}px`;
       if (badge) badge.textContent = `Teraz · ${timeStr}`;
+    }
+
+    const daySection = line.closest('.day.today');
+    const donePill = daySection?.querySelector('[data-today-done]');
+    if (donePill) {
+      donePill.hidden = !allFinished;
     }
   }
 
@@ -720,6 +825,7 @@ function render() {
   }
 
   updateLiveTimeIndicator();
+  requestAnimationFrame(refreshSpecialDayMarquees);
 }
 
 function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndMin, gridTemplate) {
@@ -744,6 +850,14 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
   headInfo.append(node('span', '', dayName), node('strong', '', date.slice(8)));
   head.append(headInfo);
 
+  if (isToday) {
+    const donePill = node('span', 'today-done-pill');
+    donePill.setAttribute('data-today-done', '');
+    donePill.hidden = true;
+    donePill.innerHTML = '<i class="ph ph-check-circle"></i><span>Koniec na dziś</span>';
+    head.append(donePill);
+  }
+
   if (canAddInDay) {
     head.title = isHoliday
       ? `Dzień wolny (${date}) — kliknij, aby dodać wydarzenie własne (poza przedmiotem)`
@@ -767,30 +881,40 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
   // Oznaczenie dnia specjalnego (święto, weekend, sesja, godziny rektorskie lub plan z innego dnia)
   if (specialDay) {
     const badge = node('div', `special-day-badge ${specialDay.type}`);
+    let iconClass = 'ph-sun-horizon';
+    let badgeText = '';
+
     if (isHoliday) {
-      badge.innerHTML = `<i class="ph ph-sun-horizon"></i> `;
-      badge.append(document.createTextNode(specialDay.label || 'Dzień wolny'));
+      iconClass = 'ph-sun-horizon';
+      badgeText = specialDay.label || 'Dzień wolny';
     } else if (isSession) {
-      badge.innerHTML = `<i class="ph ph-scroll"></i> `;
-      badge.append(document.createTextNode(specialDay.label || 'Sesja egzaminacyjna'));
+      iconClass = 'ph-scroll';
+      badgeText = specialDay.label || 'Sesja egzaminacyjna';
     } else if (isSwap) {
+      iconClass = 'ph-arrows-clockwise';
       const targetName = DAY_KEY_NAMES[specialDay.targetDay] || specialDay.targetDay;
       const labelSuffix = specialDay.label ? ` · ${specialDay.label}` : '';
-      badge.innerHTML = `<i class="ph ph-arrows-clockwise"></i> `;
-      badge.append(document.createTextNode(`Plan z ${targetName}${labelSuffix}`));
+      badgeText = `Plan z ${targetName}${labelSuffix}`;
     } else if (isRector) {
+      iconClass = 'ph-graduation-cap';
       const hoursPart =
         specialDay.start && specialDay.end
           ? `Rektorskie ${specialDay.start}–${specialDay.end}`
           : 'Dzień rektorski';
       const labelSuffix = specialDay.label ? ` · ${specialDay.label}` : '';
-      badge.innerHTML = `<i class="ph ph-graduation-cap"></i> `;
-      badge.append(document.createTextNode(`${hoursPart}${labelSuffix}`));
+      badgeText = `${hoursPart}${labelSuffix}`;
     }
+
+    const iconEl = node('i', `ph ${iconClass}`);
+    const labelOuter = node('span', 'special-day-label');
+    const labelInner = node('span', 'special-day-label-inner', badgeText);
+    labelOuter.append(labelInner);
+    badge.append(iconEl, labelOuter);
+    badge.title = editMode ? `${badgeText} — kliknij, aby zarządzać strukturą roku` : badgeText;
+
     if (editMode) {
       badge.classList.add('editable');
       badge.onclick = () => openAcademicYearDialog();
-      badge.title = 'Kliknij, aby zarządzać strukturą roku';
     }
     topWrap.append(badge);
   }
@@ -867,8 +991,15 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
 
   // Pasek aktualnej godziny na żywo (jak w USOS-ie, bez potrzeby odświeżania strony)
   if (isToday) {
+    const activeDayEvents = dayEvents.filter((e) => !isEventCancelledByRector(e, specialDay));
+    const lastEndMin = activeDayEvents.length
+      ? Math.max(...activeDayEvents.map((e) => toMinutes(e.end)))
+      : null;
+
     const nowLine = node('div', 'now-line');
     nowLine.setAttribute('data-now-line', '');
+    nowLine.dataset.hasEvents = String(activeDayEvents.length > 0);
+    nowLine.dataset.lastEndMin = lastEndMin !== null ? String(lastEndMin) : '';
     nowLine.setAttribute('aria-hidden', 'true');
     const nowDot = node('span', 'now-dot');
     const nowBadge = node('span', 'now-badge');
@@ -1121,7 +1252,9 @@ function openEventDetailsDialog(id) {
 
   const hasNotes = !!event.notes?.trim();
   $('detailsNotesSection').hidden = !hasNotes;
-  $('detailsNotes').textContent = event.notes || '';
+  renderRichTextWithLinks($('detailsNotes'), event.notes || '');
+  $('copyEventNotesBtn').onclick = () =>
+    copyTextWithFeedback(event.notes || '', $('copyEventNotesBtn'), 'Kopiuj notatkę');
 
   if (isCustom || !subject) {
     $('detailsSubjectSection').hidden = true;
@@ -1129,6 +1262,9 @@ function openEventDetailsDialog(id) {
   } else {
     $('detailsEditSubjectBtn').hidden = false;
     $('detailsSubjectSection').hidden = !setSubjectDetailsContent(subject.details);
+    $('copySubjectDetailsBtn').hidden = !subject.details?.trim();
+    $('copySubjectDetailsBtn').onclick = () =>
+      copyTextWithFeedback(subject.details || '', $('copySubjectDetailsBtn'), 'Kopiuj opis');
   }
 
   showDialogModal($('eventDetailsDialog'));
@@ -1136,7 +1272,12 @@ function openEventDetailsDialog(id) {
 
 function setSubjectDetailsContent(details) {
   const text = (details || '').trim();
-  $('detailsSubjectInfo').textContent = text || 'Brak opisu przedmiotu. Możesz go dodać przyciskiem „Edytuj opis przedmiotu”.';
+  if (text) {
+    renderRichTextWithLinks($('detailsSubjectInfo'), text);
+  } else {
+    $('detailsSubjectInfo').textContent =
+      'Brak opisu przedmiotu. Możesz go dodać przyciskiem „Edytuj opis przedmiotu”.';
+  }
   return true;
 }
 
@@ -2085,27 +2226,123 @@ function toggleKanbanChecklistItem(cardId, itemId) {
   });
 }
 
+function openKanbanDetailsDialog(cardId) {
+  const card = kanbanState.kanban.cards.find((c) => c.id === cardId);
+  if (!card) return;
+  detailsKanbanCardId = card.id;
+
+  const col = kanbanState.kanban.columns.find((c) => c.id === card.columnId);
+  const cols = kanbanState.kanban.columns;
+  const isDoneCol = cols.length > 1 && cols[cols.length - 1]?.id === card.columnId;
+
+  $('kanbanDetailsTitle').textContent = card.title;
+  $('kanbanDetailsColumn').textContent = col ? col.title : 'Zadanie';
+  $('kanbanDetailsPriority').textContent = `Priorytet: ${PRIORITY_LABELS[card.priority] || 'Średni'}`;
+
+  if (card.category) {
+    const typeVisual = getEventTypeVisual(card.category, false);
+    $('kanbanDetailsCategory').hidden = false;
+    $('kanbanDetailsCategory').innerHTML = `<i class="ph ${typeVisual.icon}"></i> `;
+    $('kanbanDetailsCategory').append(document.createTextNode(card.category));
+  } else {
+    $('kanbanDetailsCategory').hidden = true;
+  }
+
+  if (card.subjectName) {
+    $('kanbanDetailsSubject').hidden = false;
+    $('kanbanDetailsSubject').innerHTML = '<i class="ph ph-book-bookmark"></i> ';
+    $('kanbanDetailsSubject').append(document.createTextNode(card.subjectName));
+  } else {
+    $('kanbanDetailsSubject').hidden = true;
+  }
+
+  const dueInfo = getDueDateStatus(card.dueDate, isDoneCol);
+  if (dueInfo) {
+    $('kanbanDetailsDue').hidden = false;
+    $('kanbanDetailsDue').innerHTML = `<i class="ph ${dueInfo.icon}"></i> `;
+    $('kanbanDetailsDue').append(document.createTextNode(`Termin: ${dueInfo.label}`));
+  } else {
+    $('kanbanDetailsDue').hidden = true;
+  }
+
+  const hasDesc = Boolean(card.description?.trim());
+  $('kanbanDetailsDescSection').hidden = !hasDesc;
+  renderRichTextWithLinks($('kanbanDetailsDesc'), card.description || '');
+  $('copyKanbanDescBtn').onclick = () =>
+    copyTextWithFeedback(card.description || '', $('copyKanbanDescBtn'), 'Kopiuj notatkę');
+
+  const hasCheck = Boolean(card.checklist && card.checklist.length > 0);
+  $('kanbanDetailsChecklistSection').hidden = !hasCheck;
+  const checkContainer = $('kanbanDetailsChecklist');
+  checkContainer.replaceChildren();
+  if (hasCheck) {
+    const doneCount = card.checklist.filter((i) => i.done).length;
+    $('kanbanDetailsChecklistHead').textContent = `Lista podzadań (${doneCount}/${card.checklist.length})`;
+    for (const item of card.checklist) {
+      const row = node('label', `kanban-card-checkitem${item.done ? ' done' : ''}`);
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = item.done;
+      cb.disabled = !editMode;
+      cb.onchange = () => {
+        if (!editMode) return;
+        toggleKanbanChecklistItem(card.id, item.id);
+        openKanbanDetailsDialog(card.id);
+      };
+      row.append(cb, node('span', '', item.text));
+      checkContainer.append(row);
+    }
+  }
+
+  showDialogModal($('kanbanDetailsDialog'));
+}
+
 function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
-  const el = node('article', `kanban-card priority-${card.priority}${isDoneCol ? ' is-done' : ''}`);
-  el.draggable = true;
+  const el = node(
+    'article',
+    `kanban-card priority-${card.priority}${isDoneCol ? ' is-done' : ''}${editMode ? ' editable' : ''}`,
+  );
+  el.draggable = editMode;
   el.dataset.cardId = card.id;
 
-  el.addEventListener('dragstart', (e) => {
-    draggedKanbanCardId = card.id;
-    el.classList.add('dragging');
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', card.id);
-  });
-  el.addEventListener('dragend', () => {
-    draggedKanbanCardId = null;
-    el.classList.remove('dragging');
-    for (const colEl of document.querySelectorAll('.kanban-col.drag-over')) {
-      colEl.classList.remove('drag-over');
-    }
-  });
+  if (editMode) {
+    el.addEventListener('dragstart', (e) => {
+      // Jeśli użytkownik zaznacza tekst w opisie/notatce, nie uruchamiamy przeciągania karty
+      if (e.target?.closest?.('.kanban-card-desc, .rich-link-chip, .kanban-card-checklist')) {
+        e.preventDefault();
+        return;
+      }
+      draggedKanbanCardId = card.id;
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', card.id);
+    });
+    el.addEventListener('dragend', () => {
+      draggedKanbanCardId = null;
+      el.classList.remove('dragging');
+      for (const colEl of document.querySelectorAll('.kanban-col.drag-over')) {
+        colEl.classList.remove('drag-over');
+      }
+    });
+  } else {
+    el.onclick = (e) => {
+      // Jeśli użytkownik właśnie zaznaczył tekst myszką (np. żeby skopiować fragment notatki), nie otwieramy okna
+      const selection = window.getSelection?.()?.toString().trim();
+      if (selection) return;
+      if (e.target?.closest?.('a, button, input, label')) return;
+      openKanbanDetailsDialog(card.id);
+    };
+  }
 
-  // 1. Pasek plakietek na górze karty (Priorytet, Kategoria, Przedmiot)
+  // 1. Pasek plakietek na górze karty (Uchwyt przeciągania w trybie edycji, Priorytet, Kategoria, Przedmiot)
   const badgesRow = node('div', 'kanban-card-badges');
+
+  if (editMode) {
+    const dragHandle = node('span', 'kanban-drag-handle');
+    dragHandle.title = 'Chwyć tutaj, aby przeciągnąć kartę';
+    dragHandle.innerHTML = '<i class="ph ph-dots-six-vertical"></i>';
+    badgesRow.append(dragHandle);
+  }
 
   const prioBadge = node('span', `kanban-prio-badge priority-${card.priority}`);
   const prioIcon =
@@ -2135,18 +2372,64 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
 
   el.append(badgesRow);
 
-  // 2. Tytuł zadania (kliknięcie otwiera edycję)
+  // 2. Tytuł zadania (w trybie edycji otwiera edycję, w trybie przeglądania szczegóły)
   const titleBtn = node('button', 'kanban-card-title-btn', card.title);
   titleBtn.type = 'button';
-  titleBtn.onclick = () => openKanbanCardDialog(card.id);
+  titleBtn.onclick = (e) => {
+    e.stopPropagation();
+    if (editMode) {
+      openKanbanCardDialog(card.id);
+    } else {
+      openKanbanDetailsDialog(card.id);
+    }
+  };
   el.append(titleBtn);
 
-  // 3. Opis (jeśli podano)
+  // 3. Opis / notatka (z klikalnymi linkami, przyciskiem kopiowania i normalnym zaznaczaniem tekstu bez konfliktu z Drag & Drop)
   if (card.description?.trim()) {
-    el.append(node('p', 'kanban-card-desc', card.description));
+    const descWrap = node('div', 'kanban-card-desc-wrap');
+    const descEl = node('div', 'kanban-card-desc');
+    renderRichTextWithLinks(descEl, card.description);
+
+    // Wyłączamy draggable na karcie, gdy użytkownik operuje kursorem wewnątrz pola notatki,
+    // dzięki czemu można swobodnie zaznaczyć myszką dowolny fragment tekstu lub linku!
+    descWrap.addEventListener('mouseenter', () => {
+      if (editMode) el.draggable = false;
+    });
+    descWrap.addEventListener('mouseleave', () => {
+      if (editMode) el.draggable = true;
+    });
+    descWrap.addEventListener(
+      'touchstart',
+      () => {
+        if (editMode) el.draggable = false;
+      },
+      { passive: true },
+    );
+
+    const previewActions = node('div', 'kanban-desc-bar');
+    const viewNoteBtn = node('button', 'kanban-note-action-btn');
+    viewNoteBtn.type = 'button';
+    viewNoteBtn.innerHTML = '<i class="ph ph-eye"></i> <span>Podgląd notatki</span>';
+    viewNoteBtn.onclick = (e) => {
+      e.stopPropagation();
+      openKanbanDetailsDialog(card.id);
+    };
+
+    const copyNoteBtn = node('button', 'kanban-note-action-btn');
+    copyNoteBtn.type = 'button';
+    copyNoteBtn.innerHTML = '<i class="ph ph-copy"></i> <span>Kopiuj</span>';
+    copyNoteBtn.onclick = (e) => {
+      e.stopPropagation();
+      copyTextWithFeedback(card.description, copyNoteBtn, 'Kopiuj');
+    };
+
+    previewActions.append(viewNoteBtn, copyNoteBtn);
+    descWrap.append(descEl, previewActions);
+    el.append(descWrap);
   }
 
-  // 4. Interaktywna checklista podzadań bezpośrednio na karcie
+  // 4. Checklista podzadań na karcie (aktywna w trybie edycji, podgląd w trybie przeglądania)
   if (card.checklist && card.checklist.length > 0) {
     const doneCount = card.checklist.filter((i) => i.done).length;
     const totalCount = card.checklist.length;
@@ -2170,10 +2453,13 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.checked = item.done;
-      cb.onchange = (e) => {
-        e.stopPropagation();
-        toggleKanbanChecklistItem(card.id, item.id);
-      };
+      cb.disabled = !editMode;
+      if (editMode) {
+        cb.onchange = (e) => {
+          e.stopPropagation();
+          toggleKanbanChecklistItem(card.id, item.id);
+        };
+      }
       itemLabel.append(cb, node('span', '', item.text));
       listEl.append(itemLabel);
     }
@@ -2182,61 +2468,66 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     el.append(checkWrap);
   }
 
-  // 5. Stopka karty: termin wykonania + przyciski szybkiego przesuwania i edycji
-  const footer = node('div', 'kanban-card-foot');
-
+  // 5. Stopka karty: termin wykonania + przyciski szybkiego przesuwania i edycji (tylko w trybie edycji)
   const dueInfo = getDueDateStatus(card.dueDate, isDoneCol);
-  if (dueInfo) {
-    const dueBadge = node('span', `kanban-due-badge ${dueInfo.variant}`);
-    dueBadge.innerHTML = `<i class="ph ${dueInfo.icon}"></i>`;
-    dueBadge.append(node('span', '', dueInfo.label));
-    footer.append(dueBadge);
-  } else {
-    footer.append(node('span', 'kanban-due-empty', ''));
+  if (dueInfo || editMode) {
+    const footer = node('div', 'kanban-card-foot');
+
+    if (dueInfo) {
+      const dueBadge = node('span', `kanban-due-badge ${dueInfo.variant}`);
+      dueBadge.innerHTML = `<i class="ph ${dueInfo.icon}"></i>`;
+      dueBadge.append(node('span', '', dueInfo.label));
+      footer.append(dueBadge);
+    } else {
+      footer.append(node('span', 'kanban-due-empty', ''));
+    }
+
+    if (editMode) {
+      const actions = node('div', 'kanban-card-actions');
+      if (colIndex > 0) {
+        const prevCol = kanbanState.kanban.columns[colIndex - 1];
+        const leftBtn = node('button', 'kanban-icon-btn');
+        leftBtn.type = 'button';
+        leftBtn.title = `Przenieś do: ${prevCol.title}`;
+        leftBtn.setAttribute('aria-label', `Przenieś do: ${prevCol.title}`);
+        leftBtn.innerHTML = '<i class="ph ph-arrow-left"></i>';
+        leftBtn.onclick = (e) => {
+          e.stopPropagation();
+          moveKanbanCardToColumn(card.id, prevCol.id);
+        };
+        actions.append(leftBtn);
+      }
+
+      if (colIndex < totalCols - 1) {
+        const nextCol = kanbanState.kanban.columns[colIndex + 1];
+        const rightBtn = node('button', 'kanban-icon-btn');
+        rightBtn.type = 'button';
+        rightBtn.title = `Przenieś do: ${nextCol.title}`;
+        rightBtn.setAttribute('aria-label', `Przenieś do: ${nextCol.title}`);
+        rightBtn.innerHTML = '<i class="ph ph-arrow-right"></i>';
+        rightBtn.onclick = (e) => {
+          e.stopPropagation();
+          moveKanbanCardToColumn(card.id, nextCol.id);
+        };
+        actions.append(rightBtn);
+      }
+
+      const editBtn = node('button', 'kanban-icon-btn');
+      editBtn.type = 'button';
+      editBtn.title = 'Edytuj zadanie';
+      editBtn.setAttribute('aria-label', 'Edytuj zadanie');
+      editBtn.innerHTML = '<i class="ph ph-pencil-simple"></i>';
+      editBtn.onclick = (e) => {
+        e.stopPropagation();
+        openKanbanCardDialog(card.id);
+      };
+      actions.append(editBtn);
+
+      footer.append(actions);
+    }
+
+    el.append(footer);
   }
-
-  const actions = node('div', 'kanban-card-actions');
-  if (colIndex > 0) {
-    const prevCol = kanbanState.kanban.columns[colIndex - 1];
-    const leftBtn = node('button', 'kanban-icon-btn');
-    leftBtn.type = 'button';
-    leftBtn.title = `Przenieś do: ${prevCol.title}`;
-    leftBtn.setAttribute('aria-label', `Przenieś do: ${prevCol.title}`);
-    leftBtn.innerHTML = '<i class="ph ph-arrow-left"></i>';
-    leftBtn.onclick = (e) => {
-      e.stopPropagation();
-      moveKanbanCardToColumn(card.id, prevCol.id);
-    };
-    actions.append(leftBtn);
-  }
-
-  if (colIndex < totalCols - 1) {
-    const nextCol = kanbanState.kanban.columns[colIndex + 1];
-    const rightBtn = node('button', 'kanban-icon-btn');
-    rightBtn.type = 'button';
-    rightBtn.title = `Przenieś do: ${nextCol.title}`;
-    rightBtn.setAttribute('aria-label', `Przenieś do: ${nextCol.title}`);
-    rightBtn.innerHTML = '<i class="ph ph-arrow-right"></i>';
-    rightBtn.onclick = (e) => {
-      e.stopPropagation();
-      moveKanbanCardToColumn(card.id, nextCol.id);
-    };
-    actions.append(rightBtn);
-  }
-
-  const editBtn = node('button', 'kanban-icon-btn');
-  editBtn.type = 'button';
-  editBtn.title = 'Edytuj zadanie';
-  editBtn.setAttribute('aria-label', 'Edytuj zadanie');
-  editBtn.innerHTML = '<i class="ph ph-pencil-simple"></i>';
-  editBtn.onclick = (e) => {
-    e.stopPropagation();
-    openKanbanCardDialog(card.id);
-  };
-  actions.append(editBtn);
-
-  footer.append(actions);
-  el.append(footer);
 
   return el;
 }
@@ -2293,54 +2584,65 @@ function renderKanban() {
       .sort((a, b) => a.order - b.order || (PRIORITY_WEIGHT[a.priority] ?? 1) - (PRIORITY_WEIGHT[b.priority] ?? 1));
     const countBadge = node('span', 'kanban-col-count', String(colCards.length));
     titleWrap.append(iconEl, titleEl, countBadge);
+    head.append(titleWrap);
 
-    const addBtn = node('button', 'kanban-col-add-btn');
-    addBtn.type = 'button';
-    addBtn.title = `Dodaj zadanie w kolumnie „${col.title}”`;
-    addBtn.innerHTML = '<i class="ph ph-plus"></i>';
-    addBtn.onclick = () => openKanbanCardDialog(null, col.id);
+    if (editMode) {
+      const addBtn = node('button', 'kanban-col-add-btn');
+      addBtn.type = 'button';
+      addBtn.title = `Dodaj zadanie w kolumnie „${col.title}”`;
+      addBtn.innerHTML = '<i class="ph ph-plus"></i>';
+      addBtn.onclick = () => openKanbanCardDialog(null, col.id);
+      head.append(addBtn);
+    }
 
-    head.append(titleWrap, addBtn);
     colEl.append(head);
 
-    // Lista kart w kolumnie + obsługa Drag & Drop
+    // Lista kart w kolumnie + obsługa Drag & Drop (tylko w trybie edycji)
     const cardsContainer = node('div', 'kanban-cards');
 
-    colEl.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      colEl.classList.add('drag-over');
-    });
-    colEl.addEventListener('dragleave', (e) => {
-      if (!colEl.contains(e.relatedTarget)) {
-        colEl.classList.remove('drag-over');
-      }
-    });
-    colEl.addEventListener('drop', (e) => {
-      e.preventDefault();
-      colEl.classList.remove('drag-over');
-      const cardId = draggedKanbanCardId || e.dataTransfer.getData('text/plain');
-      if (!cardId) return;
-
-      // Wyznacz indeks docelowy na podstawie pozycji kursora Y względem kart w kolumnie
-      const cardElements = [...cardsContainer.querySelectorAll('.kanban-card:not(.dragging)')];
-      let targetIdx = cardElements.length;
-      for (let i = 0; i < cardElements.length; i++) {
-        const rect = cardElements[i].getBoundingClientRect();
-        if (e.clientY < rect.top + rect.height / 2) {
-          targetIdx = i;
-          break;
+    if (editMode) {
+      colEl.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        colEl.classList.add('drag-over');
+      });
+      colEl.addEventListener('dragleave', (e) => {
+        if (!colEl.contains(e.relatedTarget)) {
+          colEl.classList.remove('drag-over');
         }
-      }
-      moveKanbanCardToColumn(cardId, col.id, targetIdx);
-    });
+      });
+      colEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        colEl.classList.remove('drag-over');
+        const cardId = draggedKanbanCardId || e.dataTransfer.getData('text/plain');
+        if (!cardId) return;
+
+        // Wyznacz indeks docelowy na podstawie pozycji kursora Y względem kart w kolumnie
+        const cardElements = [...cardsContainer.querySelectorAll('.kanban-card:not(.dragging)')];
+        let targetIdx = cardElements.length;
+        for (let i = 0; i < cardElements.length; i++) {
+          const rect = cardElements[i].getBoundingClientRect();
+          if (e.clientY < rect.top + rect.height / 2) {
+            targetIdx = i;
+            break;
+          }
+        }
+        moveKanbanCardToColumn(cardId, col.id, targetIdx);
+      });
+    }
 
     if (!colCards.length) {
-      const emptyBtn = node('button', 'kanban-empty-col');
-      emptyBtn.type = 'button';
-      emptyBtn.innerHTML = '<i class="ph ph-plus-circle"></i><span>Brak zadań · Kliknij, aby dodać</span>';
-      emptyBtn.onclick = () => openKanbanCardDialog(null, col.id);
-      cardsContainer.append(emptyBtn);
+      if (editMode) {
+        const emptyBtn = node('button', 'kanban-empty-col');
+        emptyBtn.type = 'button';
+        emptyBtn.innerHTML = '<i class="ph ph-plus-circle"></i><span>Brak zadań · Kliknij, aby dodać</span>';
+        emptyBtn.onclick = () => openKanbanCardDialog(null, col.id);
+        cardsContainer.append(emptyBtn);
+      } else {
+        const emptyInfo = node('div', 'kanban-empty-col readonly');
+        emptyInfo.innerHTML = '<span>Brak zadań</span>';
+        cardsContainer.append(emptyInfo);
+      }
     } else {
       for (const card of colCards) {
         cardsContainer.append(renderKanbanCard(card, colIndex, cols.length, isLastCol));
@@ -3104,6 +3406,11 @@ function bindEvents() {
   $('kanbanCardForm').onsubmit = saveKanbanCard;
   $('deleteKanbanCardBtn').onclick = deleteKanbanCard;
   $('kanbanColumnForm').onsubmit = addKanbanColumn;
+  $('kanbanDetailsEditBtn').onclick = () => {
+    const id = detailsKanbanCardId;
+    $('kanbanDetailsDialog').close();
+    if (id) openKanbanCardDialog(id);
+  };
 
   // Przełączanie kolumn Kanban gestem swipe na telefonie
   let kanbanTouchX = null;
@@ -3320,6 +3627,9 @@ function bindEvents() {
   setInterval(updateLiveTimeIndicator, 10_000);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) updateLiveTimeIndicator();
+  });
+  window.addEventListener('resize', () => {
+    requestAnimationFrame(refreshSpecialDayMarquees);
   });
 
   $('export').onclick = () => {
