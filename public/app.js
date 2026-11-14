@@ -335,8 +335,15 @@ function reportState() {
   updateCloudStatusIndicator();
 }
 
+function closeToolbarDropdowns(except = null) {
+  for (const details of document.querySelectorAll('.toolbar-dropdown[open]')) {
+    if (details !== except) details.open = false;
+  }
+}
+
 function updateViewToolbarAndHeader() {
   const isKanban = activeView === 'kanban';
+  closeToolbarDropdowns();
 
   $('tabCalendar').classList.toggle('active', !isKanban);
   $('tabCalendar').setAttribute('aria-selected', String(!isKanban));
@@ -350,6 +357,8 @@ function updateViewToolbarAndHeader() {
   $('editModeToggle').hidden = false;
   $('addEvent').hidden = isKanban || !editMode;
   $('addKanbanCardBtn').hidden = !isKanban || !editMode;
+  $('manageDropdown').hidden = !editMode;
+  $('manageDropdownLabel').textContent = isKanban ? 'Zarządzaj tablicą' : 'Zarządzaj planem';
 
   $('academicYearBtn').hidden = isKanban || !editMode;
   $('bulkManageBtn').hidden = isKanban || !editMode;
@@ -2668,7 +2677,23 @@ async function sync(direction) {
 // --- Podpięcie zdarzeń -------------------------------------------------------
 
 function bindEvents() {
-  const closeAnd = (fn) => () => { setMobileMenuOpen(false); fn(); };
+  const closeAnd = (fn) => () => {
+    closeToolbarDropdowns();
+    setMobileMenuOpen(false);
+    fn();
+  };
+
+  for (const details of document.querySelectorAll('.toolbar-dropdown')) {
+    details.addEventListener('toggle', () => {
+      if (details.open) closeToolbarDropdowns(details);
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (!e.target?.closest?.('.toolbar-dropdown')) closeToolbarDropdowns();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeToolbarDropdowns();
+  });
 
   $('tabCalendar').onclick = () => setActiveView('calendar');
   $('tabKanban').onclick = () => setActiveView('kanban');
@@ -2682,10 +2707,10 @@ function bindEvents() {
 
   $('menuToggle').onclick = () => setMobileMenuOpen(!$('navPanel').classList.contains('open'));
   $('editModeToggle').onclick = () => setEditMode(!editMode);
-  $('addEvent').onclick = () => openEventDialog(null, addDays(week, selectedDayIndex));
+  $('addEvent').onclick = closeAnd(() => openEventDialog(null, addDays(week, selectedDayIndex)));
 
   // Kanban
-  $('addKanbanCardBtn').onclick = () => openKanbanCardDialog();
+  $('addKanbanCardBtn').onclick = closeAnd(() => openKanbanCardDialog());
   $('manageKanbanColsBtn').onclick = closeAnd(openKanbanColumnsDialog);
   $('clearKanbanDoneBtn').onclick = closeAnd(clearKanbanDone);
   $('resetKanbanBtn').onclick = closeAnd(resetKanbanBoard);
@@ -2874,8 +2899,8 @@ function bindEvents() {
   $('planId').oninput = updateConnectionPreviews;
   $('kanbanId').oninput = updateConnectionPreviews;
   $('connectionForm').onsubmit = saveConnection;
-  $('pull').onclick = () => sync('pull');
-  $('push').onclick = () => sync('push');
+  $('pull').onclick = () => { closeToolbarDropdowns(); sync('pull'); };
+  $('push').onclick = () => { closeToolbarDropdowns(); sync('push'); };
 
   window.addEventListener('storage', (e) => {
     if (e.key === STORAGE_KEY || e.key === KANBAN_STORAGE_KEY || e.key === null) {

@@ -289,7 +289,7 @@ button {
 button .ph { font-size: 16px; line-height: 1; }
 button:hover { background: var(--control-hover); }
 button:disabled { opacity: 0.45; cursor: wait; }
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
 .primary, #editModeToggle[aria-pressed="true"] { background: var(--green); color: var(--on-green); border-color: var(--green); }
 .primary:hover, #editModeToggle[aria-pressed="true"]:hover { background: var(--green-hover); }
@@ -316,7 +316,49 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .toolbar .actions { display: flex; align-items: center; gap: 7px; flex-wrap: nowrap; }
 .toolbar-right { margin-left: auto; flex-shrink: 0; }
-.toolbar button { padding: 9px 11px; font-size: 12.5px; white-space: nowrap; }
+.toolbar button, .toolbar-dropdown-btn { padding: 9px 11px; font-size: 12.5px; white-space: nowrap; }
+
+.toolbar-dropdown { position: relative; }
+.toolbar-dropdown-btn {
+  list-style: none;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--control-text);
+  background: var(--control);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  user-select: none;
+}
+.toolbar-dropdown-btn::-webkit-details-marker { display: none; }
+.toolbar-dropdown-btn:hover, .toolbar-dropdown[open] .toolbar-dropdown-btn { background: var(--control-hover); }
+.toolbar-dropdown[open] .toolbar-dropdown-btn { border-color: var(--accent); }
+.toolbar-dropdown-btn .ph { font-size: 16px; line-height: 1; }
+.dropdown-caret { font-size: 12px !important; transition: transform 0.15s ease; }
+.toolbar-dropdown[open] .dropdown-caret { transform: rotate(180deg); }
+
+.toolbar-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 220px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.toolbar-dropdown-menu-right { left: auto; right: 0; }
+.toolbar-dropdown-menu button { width: 100%; justify-content: flex-start; padding: 9px 11px; border-radius: 8px; }
 
 .status { font-size: 12px; padding: 10px 14px; background: var(--soft); border-radius: 8px; min-height: 38px; }
 
@@ -922,7 +964,7 @@ textarea { min-height: 70px; resize: vertical; }
   .header-actions button { font-size: 12px; white-space: nowrap; padding: 8px 10px; }
   .cloud-status-badge { min-width: 0; padding: 8px 9px; gap: 5px; }
   #editModeToggle, #themeToggle, #addEvent, #addKanbanCardBtn { min-width: 0; }
-  .cloud-status-text, #editModeToggle .btn-label, #addEvent .btn-label, #addKanbanCardBtn .btn-label { display: none; }
+  .cloud-status-text, #editModeToggle .btn-label { display: none; }
 
   .view-tabs { order: 3; width: 100%; display: grid; grid-template-columns: 1fr 1fr; padding: 3px; }
   .view-tab { justify-content: center; padding: 7px 8px; font-size: 12.5px; }
@@ -935,7 +977,11 @@ textarea { min-height: 70px; resize: vertical; }
   .nav-panel.open { display: block; }
   .toolbar { flex-direction: column; gap: 8px; padding-bottom: 10px; }
   .toolbar .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; width: 100%; }
-  .toolbar .actions button { width: 100%; justify-content: flex-start; padding: 9px 10px; font-size: 12px; }
+  .toolbar .actions button, .toolbar-dropdown-btn { width: 100%; justify-content: flex-start; padding: 9px 10px; font-size: 12px; }
+  .toolbar-dropdown { width: 100%; }
+  .toolbar-dropdown[open] { grid-column: 1 / -1; }
+  .toolbar-dropdown-btn .dropdown-caret { margin-left: auto; }
+  .toolbar-dropdown-menu { position: static; margin-top: 5px; width: 100%; box-shadow: none; background: var(--soft); }
   .status { margin: 10px 0 0; padding: 8px 10px; min-height: 0; font-size: 11px; overflow-wrap: anywhere; }
   button { padding: 8px 10px; font-size: 12px; }
 

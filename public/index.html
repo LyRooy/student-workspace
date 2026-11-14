@@ -28,12 +28,6 @@
         </button>
       </nav>
       <div class="actions header-actions">
-        <button type="button" id="addEvent" class="primary" hidden>
-          <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zajęcia</span>
-        </button>
-        <button type="button" id="addKanbanCardBtn" class="primary" hidden>
-          <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zadanie</span>
-        </button>
         <button
           type="button"
           id="cloudStatusBadge"
@@ -70,23 +64,50 @@
           <div class="actions toolbar-left">
             <button type="button" id="themeToggleMobile" class="mobile-only"><i class="ph ph-circle-half"></i> Motyw</button>
             <button type="button" id="subjects"><i class="ph ph-book-open"></i> Przedmioty</button>
-            <button type="button" id="export"><i class="ph ph-export"></i> <span id="exportLabel">Eksport (.json)</span></button>
-            <button type="button" id="importButton"><i class="ph ph-download-simple"></i> <span id="importLabel">Import (.json)</span></button>
-            <input type="file" id="import" accept="application/json,.json" hidden>
-            <button type="button" id="academicYearBtn" hidden><i class="ph ph-calendar-blank"></i> Struktura roku</button>
-            <button type="button" id="bulkManageBtn" hidden><i class="ph ph-trash"></i> Masowe usuwanie / reset</button>
-            <button type="button" id="manageKanbanColsBtn" hidden><i class="ph ph-columns"></i> Kolumny</button>
-            <button type="button" id="clearKanbanDoneBtn" hidden>
-              <i class="ph ph-check-circle"></i> Wyczyść „Zrobione”
+            <details id="fileDropdown" class="toolbar-dropdown">
+              <summary class="toolbar-dropdown-btn">
+                <i class="ph ph-file-arrow-down"></i> <span>Dane (.json)</span> <i class="ph ph-caret-down dropdown-caret"></i>
+              </summary>
+              <div class="toolbar-dropdown-menu">
+                <button type="button" id="export"><i class="ph ph-export"></i> <span id="exportLabel">Eksport (.json)</span></button>
+                <button type="button" id="importButton"><i class="ph ph-download-simple"></i> <span id="importLabel">Import (.json)</span></button>
+                <input type="file" id="import" accept="application/json,.json" hidden>
+              </div>
+            </details>
+            <button type="button" id="addEvent" class="primary" hidden>
+              <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zajęcia</span>
             </button>
-            <button type="button" id="resetKanbanBtn" class="danger" hidden>
-              <i class="ph ph-trash"></i> Resetuj tablicę
+            <button type="button" id="addKanbanCardBtn" class="primary" hidden>
+              <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zadanie</span>
             </button>
+            <details id="manageDropdown" class="toolbar-dropdown" hidden>
+              <summary class="toolbar-dropdown-btn">
+                <i class="ph ph-sliders-horizontal"></i> <span id="manageDropdownLabel">Zarządzaj</span> <i class="ph ph-caret-down dropdown-caret"></i>
+              </summary>
+              <div class="toolbar-dropdown-menu">
+                <button type="button" id="academicYearBtn" hidden><i class="ph ph-calendar-blank"></i> Struktura roku</button>
+                <button type="button" id="bulkManageBtn" hidden><i class="ph ph-trash"></i> Masowe usuwanie / reset</button>
+                <button type="button" id="manageKanbanColsBtn" hidden><i class="ph ph-columns"></i> Kolumny</button>
+                <button type="button" id="clearKanbanDoneBtn" hidden>
+                  <i class="ph ph-check-circle"></i> Wyczyść „Zrobione”
+                </button>
+                <button type="button" id="resetKanbanBtn" class="danger" hidden>
+                  <i class="ph ph-trash"></i> Resetuj tablicę
+                </button>
+              </div>
+            </details>
           </div>
           <div class="actions toolbar-right">
-            <button type="button" id="connection"><i class="ph ph-key"></i> Ustawienia chmury</button>
-            <button type="button" id="pull"><i class="ph ph-arrow-down"></i> <span id="pullLabel">Pobierz z chmury</span></button>
-            <button type="button" id="push" class="primary"><i class="ph ph-arrow-up"></i> <span id="pushLabel">Zapisz w chmurze</span></button>
+            <details id="cloudDropdown" class="toolbar-dropdown">
+              <summary class="toolbar-dropdown-btn">
+                <i class="ph ph-cloud-arrow-up"></i> <span>Chmura</span> <i class="ph ph-caret-down dropdown-caret"></i>
+              </summary>
+              <div class="toolbar-dropdown-menu toolbar-dropdown-menu-right">
+                <button type="button" id="push" class="primary"><i class="ph ph-arrow-up"></i> <span id="pushLabel">Zapisz w chmurze</span></button>
+                <button type="button" id="pull"><i class="ph ph-arrow-down"></i> <span id="pullLabel">Pobierz z chmury</span></button>
+                <button type="button" id="connection"><i class="ph ph-key"></i> Ustawienia chmury</button>
+              </div>
+            </details>
           </div>
         </section>
 
