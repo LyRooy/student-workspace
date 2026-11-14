@@ -1,5 +1,5 @@
-// Logika interfejsu: renderowanie tygodnia, tryb przeglądania i edycji,
-// formularze, zapis lokalny (localStorage) oraz synchronizacja z Workerem Cloudflare (/api/plan).
+// Logika interfejsu: Plan zajęć, Tablica Kanban, tryb przeglądania i edycji,
+// zapis lokalny (localStorage) oraz synchronizacja z Workerem Cloudflare (/api/plan, /api/kanban).
 
 import {
   emptyPlan,
@@ -23,42 +23,77 @@ const TOKEN_KEY = 'student-calendar-token';
 const PLAN_ID_KEY = 'student-calendar-plan-id';
 const KANBAN_ID_KEY = 'student-calendar-kanban-id';
 const AUTO_SYNC_KEY = 'student-calendar-auto-sync';
-const API_URL = '/api/plan'; // ten sam adres co frontend — Worker obsługuje oba
+const API_URL = '/api/plan';
 const KANBAN_API_URL = '/api/kanban';
 const API_TIMEOUT_MS = 20_000;
 const AUTO_SAVE_DELAY_MS = 2500;
 const AUTO_PULL_COOLDOWN_MS = 45_000;
 const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 const MIN_TOKEN_LENGTH = 32;
+
 const DAY_NAMES = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Ndz'];
 const MOBILE_DAY_CODES = ['PN', 'WT', 'ŚR', 'CZ', 'PT', 'SB', 'ND'];
+const DAY_KEY_NAMES = {
+  mon: 'poniedziałku',
+  tue: 'wtorku',
+  wed: 'środy',
+  thu: 'czwartku',
+  fri: 'piątku',
+  sat: 'soboty',
+  sun: 'niedzieli',
+};
 
-function weekdayIndex(date) {
-  return (new Date(date + 'T12:00:00Z').getUTCDay() + 6) % 7;
-}
+const SLOT_MINUTES = 5;
+const SLOT_HEIGHT_PX = 15; // 5 min = 15px
+const DEFAULT_START_MIN = 8 * 60;
+const DEFAULT_END_MIN = 16 * 60;
+const CUSTOM_SUBJECT_VALUE = '__custom__';
+const CUSTOM_TYPE_VALUE = '__custom__';
+const KANBAN_CUSTOM_SUBJECT = '__custom_subject__';
+const KANBAN_CUSTOM_CATEGORY = '__custom__';
+const EVENT_FIELDS = ['start', 'end', 'room', 'teacher', 'notes'];
+const PRIORITY_LABELS = { high: 'Wysoki', medium: 'Średni', low: 'Niski' };
+const PRIORITY_WEIGHT = { high: 0, medium: 1, low: 2 };
 
-/** state.plan – dane planu, state.etag – wersja z chmury, state.dirty – niezsynchronizowane zmiany */
+const TYPE_VISUAL_RULES = [
+  [['poprawk', 'komis'], 'type-retake', 'ph-arrow-counter-clockwise'],
+  [['egzamin'], 'type-exam', 'ph-scroll'],
+  [['kolokwium', 'zaliczeni', 'wejściów', 'test'], 'type-test', 'ph-check-square-offset'],
+  [['obrona', 'dyplom'], 'type-defense', 'ph-graduation-cap'],
+  [['wykład', 'wyklad'], 'type-lecture', 'ph-chalkboard-teacher'],
+  [['lab'], 'type-lab', 'ph-flask'],
+  [['projekt'], 'type-project', 'ph-kanban'],
+  [['ćwicz', 'cwicz', 'lektorat', 'wf'], 'type-exercise', 'ph-pencil-line'],
+  [['seminarium'], 'type-seminar', 'ph-chats-circle'],
+  [['konsultac', 'promotor', 'spotkanie'], 'type-consult', 'ph-user-focus'],
+  [['odrabianie'], 'type-makeup', 'ph-clock-clockwise'],
+  [['lekarz', 'dentyst', 'prywatn', 'badani'], 'type-other', 'ph-first-aid-kit'],
+  [['warsztat', 'szkoleni', 'kurs', 'trening'], 'type-exercise', 'ph-wrench'],
+  [['koło', 'kolo', 'zebranie', 'rada'], 'type-consult', 'ph-users-three'],
+];
+
+const weekdayIndex = (date) => (new Date(date + 'T12:00:00Z').getUTCDay() + 6) % 7;
+
 let state = { plan: emptyPlan(), etag: null, dirty: false };
-let lastStored = null;       // ostatnia wartość zapisana przez tę kartę (wykrywanie innych kart)
-/** kanbanState.kanban – osobny obiekt tablicy Kanban zapisywany w osobnym pliku JSON */
+let lastStored = null;
 let kanbanState = { kanban: emptyKanban(), etag: null, dirty: false };
 let lastStoredKanban = null;
 let activeView = 'calendar'; // 'calendar' | 'kanban'
-let storageBlocked = false;  // localStorage niedostępny lub zmieniony przez inną kartę
-let busy = false;            // trwa synchronizacja
-let editMode = false;        // false = normalny tryb przeglądania, true = tryb edycji
-let editingId = null;        // id edytowanych zajęć (null = nowe)
-let detailsEventId = null;   // id zajęć aktualnie wyświetlanych w oknie szczegółów
+let storageBlocked = false;
+let busy = false;
+let editMode = false;
+let editingId = null;
+let detailsEventId = null;
 let editingKanbanCardId = null;
 let detailsKanbanCardId = null;
-let draftChecklist = [];     // robocza checklista w oknie edycji zadania Kanban
-let selectedKanbanColIndex = 0; // aktywna kolumna w widoku mobilnym tablicy Kanban
+let draftChecklist = [];
+let selectedKanbanColIndex = 0;
 let kanbanMobileSlideDir = '';
 let draggedKanbanCardId = null;
-let week = monday(today());  // poniedziałek wyświetlanego tygodnia
-let selectedDayIndex = weekdayIndex(today()); // 0..6 — aktywny dzień w widoku mobilnym (jak w USOS)
-let mobileSlideDir = '';     // 'slide-next' | 'slide-prev' | '' — kierunek animacji przełączania dnia na telefonie
-let currentGridBounds = { startMin: 8 * 60, endMin: 16 * 60 };
+let week = monday(today());
+let selectedDayIndex = weekdayIndex(today());
+let mobileSlideDir = '';
+let currentGridBounds = { startMin: DEFAULT_START_MIN, endMin: DEFAULT_END_MIN };
 let lastRenderedToday = today();
 let lockedScrollY = 0;
 let isScrollLocked = false;
@@ -69,17 +104,64 @@ let cloudSyncState = 'unconfigured'; // 'unconfigured' | 'synced' | 'pending' | 
 let cloudSyncDetail = '';
 let lastAutoPullAt = 0;
 
+const TARGETS = {
+  plan: {
+    storageKey: STORAGE_KEY,
+    idKey: PLAN_ID_KEY,
+    apiUrl: API_URL,
+    prop: 'plan',
+    validate: validatePlan,
+    resolveKey: resolvePlanKey,
+    blockedMsg: 'Zapis lokalny jest zablokowany. Wyeksportuj plan przed przeładowaniem strony.',
+    otherTabMsg: 'Inna karta zmieniła plan. Wyeksportuj swoją kopię i odśwież stronę.',
+    nounGen: 'planu',
+    nounAcc: 'plan',
+    label: 'plan zajęć',
+    hasData: (p) => p.events.length > 0 || p.subjects.length > 0 || (p.academicYear?.specialDays?.length || 0) > 0,
+    getState: () => state,
+    setState: (s) => { state = s; },
+    getLastStored: () => lastStored,
+    setLastStored: (v) => { lastStored = v; },
+    getTimer: () => planAutoSaveTimer,
+    setTimer: (t) => { planAutoSaveTimer = t; },
+    onAfterChange: () => { render(); renderKanbanBadge(); if (activeView === 'kanban') renderKanban(); },
+    onAfterPull: () => { render(); renderKanbanBadge(); },
+  },
+  kanban: {
+    storageKey: KANBAN_STORAGE_KEY,
+    idKey: KANBAN_ID_KEY,
+    apiUrl: KANBAN_API_URL,
+    prop: 'kanban',
+    validate: validateKanban,
+    resolveKey: resolveKanbanKey,
+    blockedMsg: 'Zapis lokalny jest zablokowany. Wyeksportuj tablicę Kanban przed przeładowaniem strony.',
+    otherTabMsg: 'Inna karta zmieniła tablicę Kanban. Wyeksportuj swoją kopię i odśwież stronę.',
+    nounGen: 'tablicy Kanban',
+    nounAcc: 'tablicę Kanban',
+    label: 'tablicę Kanban',
+    hasData: (k) => k.cards.length > 0,
+    getState: () => kanbanState,
+    setState: (s) => { kanbanState = s; },
+    getLastStored: () => lastStoredKanban,
+    setLastStored: (v) => { lastStoredKanban = v; },
+    getTimer: () => kanbanAutoSaveTimer,
+    setTimer: (t) => { kanbanAutoSaveTimer = t; },
+    onAfterChange: () => renderKanban(),
+    onAfterPull: () => renderKanban(),
+  },
+};
+
 // --- Narzędzia ---------------------------------------------------------------
 
-function $(id) {
-  return document.getElementById(id);
-}
+const $ = (id) => document.getElementById(id);
+const uid = () => crypto.randomUUID();
+const clone = (value) => structuredClone(value);
+const toMinutes = (time) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+const slotTier = (m) => (m % 60 === 0 ? 'hour' : m % 15 === 0 ? 'quarter' : 'five');
 
-/** Dzisiejsza data lokalna w formacie RRRR-MM-DD. */
 function today() {
   const now = new Date();
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
-  return local.toISOString().slice(0, 10);
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
 }
 
 function nowMinutesFloat() {
@@ -89,21 +171,57 @@ function nowMinutesFloat() {
 
 function nowTimeLabel() {
   const now = new Date();
-  const h = String(now.getHours()).padStart(2, '0');
-  const m = String(now.getMinutes()).padStart(2, '0');
-  return `${h}:${m}`;
+  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 }
 
-/** Blokuje przewijanie tła strony, gdy jakiekolwiek okno modalne (<dialog>) jest otwarte. */
+function fromMinutes(total) {
+  const clamped = Math.max(0, Math.min(23 * 60 + 59, Math.round(total)));
+  return `${String(Math.floor(clamped / 60)).padStart(2, '0')}:${String(clamped % 60).padStart(2, '0')}`;
+}
+
+function formatDuration(minutes) {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h > 0 && m > 0) return `${h} godz. ${m} min`;
+  return h > 0 ? `${h} godz.` : `${m} min`;
+}
+
+function node(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+function iconBtn(className, iconClass, title, onClick, text) {
+  const btn = node('button', className);
+  btn.type = 'button';
+  if (title) {
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+  }
+  btn.innerHTML = `<i class="ph ${iconClass}"></i>`;
+  if (text) btn.append(document.createTextNode(' ' + text));
+  if (onClick) btn.onclick = onClick;
+  return btn;
+}
+
+function iconTag(className, iconClass, text) {
+  const el = node('span', className);
+  el.innerHTML = `<i class="ph ${iconClass}"></i>`;
+  el.append(node('span', '', text));
+  return el;
+}
+
 function syncModalScrollLock() {
-  const anyDialogOpen = Boolean(document.querySelector('dialog[open]'));
-  if (anyDialogOpen && !isScrollLocked) {
+  const open = Boolean(document.querySelector('dialog[open]'));
+  if (open && !isScrollLocked) {
     lockedScrollY = window.scrollY || document.documentElement.scrollTop || 0;
     isScrollLocked = true;
     document.documentElement.classList.add('modal-open');
     document.body.classList.add('modal-open');
     document.body.style.top = `-${lockedScrollY}px`;
-  } else if (!anyDialogOpen && isScrollLocked) {
+  } else if (!open && isScrollLocked) {
     isScrollLocked = false;
     document.documentElement.classList.remove('modal-open');
     document.body.classList.remove('modal-open');
@@ -117,42 +235,26 @@ function showDialogModal(dialogEl) {
   syncModalScrollLock();
 }
 
-const uid = () => crypto.randomUUID();
-const clone = (value) => structuredClone(value);
-
-function node(tag, className, text) {
-  const el = document.createElement(tag);
-  if (className) el.className = className;
-  if (text !== undefined) el.textContent = text;
-  return el;
-}
-
 const URL_REGEX = /(https?:\/\/[^\s<>"')]+)/gi;
 
 async function copyTextWithFeedback(text, btnEl, defaultLabel = null) {
   if (!text) return;
   try {
     await navigator.clipboard.writeText(text);
-    if (btnEl) {
-      const prevHtml = btnEl.innerHTML;
-      btnEl.classList.add('copied');
-      btnEl.innerHTML = defaultLabel
-        ? '<i class="ph ph-check"></i> <span>Skopiowano!</span>'
-        : '<i class="ph ph-check"></i>';
-      setTimeout(() => {
-        btnEl.classList.remove('copied');
-        btnEl.innerHTML = prevHtml;
-      }, 1500);
-    }
+    if (!btnEl) return;
+    const prevHtml = btnEl.innerHTML;
+    btnEl.classList.add('copied');
+    btnEl.innerHTML = defaultLabel ? '<i class="ph ph-check"></i> <span>Skopiowano!</span>' : '<i class="ph ph-check"></i>';
+    setTimeout(() => {
+      btnEl.classList.remove('copied');
+      btnEl.innerHTML = prevHtml;
+    }, 1500);
   } catch {
     setStatus('Nie udało się automatycznie skopiować do schowka.');
   }
 }
 
-/**
- * Renderuje tekst notatki/opisu z automatycznym zamienianiem adresów URL (http/https)
- * na klikalne odnośniki z przyciskiem „Kopiuj link” obok każdego linku.
- */
+/** Zamienia adresy URL (http/https) w tekście na klikalne odnośniki z przyciskiem kopiowania. */
 function renderRichTextWithLinks(container, rawText) {
   container.replaceChildren();
   const text = rawText || '';
@@ -162,10 +264,7 @@ function renderRichTextWithLinks(container, rawText) {
   for (const match of text.matchAll(URL_REGEX)) {
     const url = match[0];
     const startIdx = match.index ?? 0;
-
-    if (startIdx > lastIdx) {
-      container.append(document.createTextNode(text.slice(lastIdx, startIdx)));
-    }
+    if (startIdx > lastIdx) container.append(document.createTextNode(text.slice(lastIdx, startIdx)));
 
     const chip = node('span', 'rich-link-chip');
     const link = node('a', 'rich-link');
@@ -177,73 +276,45 @@ function renderRichTextWithLinks(container, rawText) {
     link.append(node('span', 'rich-link-url', url));
     link.onclick = (e) => e.stopPropagation();
 
-    const copyBtn = node('button', 'rich-link-copy');
-    copyBtn.type = 'button';
-    copyBtn.title = 'Kopiuj ten link do schowka';
-    copyBtn.setAttribute('aria-label', 'Kopiuj link');
-    copyBtn.innerHTML = '<i class="ph ph-copy"></i>';
-    copyBtn.onclick = (e) => {
+    const copyBtn = iconBtn('rich-link-copy', 'ph-copy', 'Kopiuj ten link do schowka', (e) => {
       e.preventDefault();
       e.stopPropagation();
       copyTextWithFeedback(url, copyBtn);
-    };
+    });
+    copyBtn.setAttribute('aria-label', 'Kopiuj link');
 
     chip.append(link, copyBtn);
     container.append(chip);
     lastIdx = startIdx + url.length;
   }
-
-  if (lastIdx < text.length) {
-    container.append(document.createTextNode(text.slice(lastIdx)));
-  }
+  if (lastIdx < text.length) container.append(document.createTextNode(text.slice(lastIdx)));
 }
 
 const dayMonthFormat = new Intl.DateTimeFormat('pl-PL', { day: 'numeric', month: 'long' });
-const shortClockDateFormat = new Intl.DateTimeFormat('pl-PL', {
-  weekday: 'short',
-  day: 'numeric',
-  month: 'short',
-});
-const fullDateFormat = new Intl.DateTimeFormat('pl-PL', {
-  weekday: 'long',
-  day: 'numeric',
-  month: 'long',
-  year: 'numeric',
-});
+const shortClockDateFormat = new Intl.DateTimeFormat('pl-PL', { weekday: 'short', day: 'numeric', month: 'short' });
+const fullDateFormat = new Intl.DateTimeFormat('pl-PL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 const formatDate = (date) => dayMonthFormat.format(new Date(date + 'T12:00:00Z'));
 const formatFullDate = (date) => fullDateFormat.format(new Date(date + 'T12:00:00Z'));
 
-const toMinutes = (time) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+// --- Komunikaty i widoki -----------------------------------------------------
 
-// --- Komunikaty --------------------------------------------------------------
-
-function setStatus(message) {
-  $('status').textContent = message;
-}
+const setStatus = (message) => { $('status').textContent = message; };
 
 function reportState() {
   if (storageBlocked) {
     setStatus('Nie można bezpiecznie zapisać danych lokalnych. Wyeksportuj plik JSON i sprawdź pamięć przeglądarki.');
-    updateCloudStatusIndicator();
-    return;
-  }
-  if (activeView === 'kanban') {
-    if (kanbanState.dirty) {
-      setStatus(
-        'Masz lokalne zmiany w tablicy Kanban · Kliknij „Zapisz tablicę w chmurze” lub poczekaj na auto-zapis (2,5 s).',
-      );
-    } else {
-      setStatus(
-        'Tablica Kanban zapisana lokalnie (osobny plik kanban.json) · Pobierz z chmury, aby sprawdzić aktualną wersję.',
-      );
-    }
-    updateCloudStatusIndicator();
-    return;
-  }
-  if (state.dirty) {
-    setStatus('Masz lokalne zmiany · Kliknij „Zapisz plan w chmurze” lub poczekaj na auto-zapis (2,5 s).');
+  } else if (activeView === 'kanban') {
+    setStatus(
+      kanbanState.dirty
+        ? 'Masz lokalne zmiany w tablicy Kanban · Kliknij „Zapisz tablicę w chmurze” lub poczekaj na auto-zapis (2,5 s).'
+        : 'Tablica Kanban zapisana lokalnie (osobny plik kanban.json) · Pobierz z chmury, aby sprawdzić aktualną wersję.',
+    );
   } else {
-    setStatus('Plan zapisany lokalnie · Pobierz z chmury, aby sprawdzić aktualną wersję.');
+    setStatus(
+      state.dirty
+        ? 'Masz lokalne zmiany · Kliknij „Zapisz plan w chmurze” lub poczekaj na auto-zapis (2,5 s).'
+        : 'Plan zapisany lokalnie · Pobierz z chmury, aby sprawdzić aktualną wersję.',
+    );
   }
   updateCloudStatusIndicator();
 }
@@ -258,18 +329,15 @@ function updateViewToolbarAndHeader() {
 
   $('calendarView').hidden = isKanban;
   $('kanbanView').hidden = !isKanban;
-
   $('appHeading').innerHTML = isKanban ? 'Tablica Kanban<span>.</span>' : 'Plan zajęć<span>.</span>';
 
-  // Przyciski paska górnego zależne od aktywnej zakładki oraz trybu edycji
   $('editModeToggle').hidden = false;
   $('addEvent').hidden = isKanban || !editMode;
-  $('manageKanbanColsBtn').hidden = !isKanban || !editMode;
   $('addKanbanCardBtn').hidden = !isKanban || !editMode;
 
-  // Przyciski w panelu narzędzi (#navPanel)
   $('academicYearBtn').hidden = isKanban || !editMode;
   $('bulkManageBtn').hidden = isKanban || !editMode;
+  $('manageKanbanColsBtn').hidden = !isKanban || !editMode;
   $('clearKanbanDoneBtn').hidden = !isKanban || !editMode;
   $('resetKanbanBtn').hidden = !isKanban || !editMode;
 
@@ -280,7 +348,7 @@ function updateViewToolbarAndHeader() {
 
   $('export').title = isKanban ? 'Eksportuj tablicę Kanban do pliku .json' : 'Eksportuj plan zajęć do pliku .json';
   $('importButton').title = isKanban ? 'Importuj tablicę Kanban z pliku .json' : 'Importuj plan zajęć z pliku .json';
-  $('pull').title = isKanban ? 'Pobierz najnowszą tablicę Kanban z chmury' : 'Pobierz najnowszy plan zajęć z chmurą';
+  $('pull').title = isKanban ? 'Pobierz najnowszą tablicę Kanban z chmury' : 'Pobierz najnowszy plan zajęć z chmury';
   $('push').title = isKanban ? 'Zapisz tablicę Kanban w chmurze' : 'Zapisz plan zajęć w chmurze';
   updateConnectionButtonLabel();
 }
@@ -288,15 +356,10 @@ function updateViewToolbarAndHeader() {
 function setActiveView(view) {
   activeView = view === 'kanban' ? 'kanban' : 'calendar';
   updateViewToolbarAndHeader();
-  if (activeView === 'kanban') {
-    renderKanban();
-  } else {
-    render();
-  }
+  if (activeView === 'kanban') renderKanban();
+  else render();
   reportState();
 }
-
-// --- Tryb przeglądania vs. Tryb edycji ---------------------------------------
 
 function setEditMode(enabled) {
   editMode = !!enabled;
@@ -320,186 +383,94 @@ function setEditMode(enabled) {
 }
 
 function setMobileMenuOpen(open) {
-  const panel = $('navPanel');
-  const btn = $('menuToggle');
   const isOpen = !!open;
-  panel.classList.toggle('open', isOpen);
+  $('navPanel').classList.toggle('open', isOpen);
+  const btn = $('menuToggle');
   btn.setAttribute('aria-expanded', String(isOpen));
-  btn.innerHTML = isOpen
-    ? '<i class="ph ph-x"></i><span>Zamknij</span>'
-    : '<i class="ph ph-list"></i><span>Menu</span>';
+  btn.innerHTML = isOpen ? '<i class="ph ph-x"></i><span>Zamknij</span>' : '<i class="ph ph-list"></i><span>Menu</span>';
 }
 
-// --- Zapis lokalny -----------------------------------------------------------
+// --- Zapis lokalny i mutacje -------------------------------------------------
 
 function loadFromStorage() {
   try {
-    lastStored = localStorage.getItem(STORAGE_KEY);
-    if (lastStored) {
-      const saved = JSON.parse(lastStored);
-      validatePlan(saved.plan);
-      state = { plan: saved.plan, etag: saved.etag ?? null, dirty: !!saved.dirty };
-    }
-    lastStoredKanban = localStorage.getItem(KANBAN_STORAGE_KEY);
-    if (lastStoredKanban) {
-      const savedKanban = JSON.parse(lastStoredKanban);
-      validateKanban(savedKanban.kanban);
-      kanbanState = {
-        kanban: savedKanban.kanban,
-        etag: savedKanban.etag ?? null,
-        dirty: !!savedKanban.dirty,
-      };
+    for (const key of ['plan', 'kanban']) {
+      const cfg = TARGETS[key];
+      const raw = localStorage.getItem(cfg.storageKey);
+      cfg.setLastStored(raw);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        cfg.validate(saved[cfg.prop]);
+        cfg.setState({ [cfg.prop]: saved[cfg.prop], etag: saved.etag ?? null, dirty: !!saved.dirty });
+      }
     }
   } catch {
-    // Brak dostępu do localStorage lub uszkodzony wpis — blokujemy zapis, żeby niczego nie nadpisać.
     storageBlocked = true;
   }
 }
 
-function persist(next) {
-  if (storageBlocked) {
-    throw Error('Zapis lokalny jest zablokowany. Wyeksportuj plan przed przeładowaniem strony.');
-  }
-  if (localStorage.getItem(STORAGE_KEY) !== lastStored) {
-    throw Error('Inna karta zmieniła plan. Wyeksportuj swoją kopię i odśwież stronę.');
-  }
+function persistTarget(target, next) {
+  const cfg = TARGETS[target];
+  if (storageBlocked) throw Error(cfg.blockedMsg);
+  if (localStorage.getItem(cfg.storageKey) !== cfg.getLastStored()) throw Error(cfg.otherTabMsg);
 
   const encoded = JSON.stringify(next);
-  localStorage.setItem(STORAGE_KEY, encoded);
-  lastStored = encoded;
-  state = next;
+  localStorage.setItem(cfg.storageKey, encoded);
+  cfg.setLastStored(encoded);
+  cfg.setState(next);
 }
 
-function persistKanban(next) {
-  if (storageBlocked) {
-    throw Error('Zapis lokalny jest zablokowany. Wyeksportuj tablicę Kanban przed przeładowaniem strony.');
-  }
-  if (localStorage.getItem(KANBAN_STORAGE_KEY) !== lastStoredKanban) {
-    throw Error('Inna karta zmieniła tablicę Kanban. Wyeksportuj swoją kopię i odśwież stronę.');
-  }
-
-  const encoded = JSON.stringify(next);
-  localStorage.setItem(KANBAN_STORAGE_KEY, encoded);
-  lastStoredKanban = encoded;
-  kanbanState = next;
-}
-
-/** Wykonuje zmianę na kopii planu, waliduje ją, zapisuje lokalnie i odświeża widok. */
-function mutate(change) {
+function mutateTarget(target, change) {
   if (busy) throw Error('Poczekaj na zakończenie synchronizacji.');
-
-  const next = clone(state);
-  change(next.plan);
-  validatePlan(next.plan);
+  const cfg = TARGETS[target];
+  const next = clone(cfg.getState());
+  change(next[cfg.prop]);
+  cfg.validate(next[cfg.prop]);
   next.dirty = true;
 
-  persist(next);
-  render();
-  renderKanbanBadge();
-  if (activeView === 'kanban') renderKanban();
+  persistTarget(target, next);
+  cfg.onAfterChange();
   reportState();
-  scheduleAutoPush('plan');
+  scheduleAutoPush(target);
 }
 
-/** Wykonuje zmianę na kopii tablicy Kanban, waliduje ją, zapisuje lokalnie i odświeża widok. */
-function mutateKanban(change) {
-  if (busy) throw Error('Poczekaj na zakończenie synchronizacji.');
+const mutate = (change) => mutateTarget('plan', change);
+const mutateKanban = (change) => mutateTarget('kanban', change);
 
-  const next = clone(kanbanState);
-  change(next.kanban);
-  validateKanban(next.kanban);
-  next.dirty = true;
+// --- Siatka tygodniowa, okienka i godziny rektorskie ------------------------
 
-  persistKanban(next);
-  renderKanban();
-  reportState();
-  scheduleAutoPush('kanban');
-}
-
-// Mapowanie dni tygodnia na klucze
-const DAY_KEY_NAMES = {
-  mon: 'poniedziałku',
-  tue: 'wtorku',
-  wed: 'środy',
-  thu: 'czwartku',
-  fri: 'piątku',
-  sat: 'soboty',
-  sun: 'niedzieli',
-};
-
-// --- Widok tygodnia (oś godzin co 5 min, zajęcia proporcjonalne i okienka) ---
-
-const SLOT_MINUTES = 5;
-const SLOT_HEIGHT_PX = 15; // 5 min = 15px → 15 min = 45px, 45 min = 135px, 60 min = 180px
-const DEFAULT_START_MIN = 8 * 60; // 08:00
-const DEFAULT_END_MIN = 16 * 60;  // 16:00
-
-function fromMinutes(total) {
-  const clamped = Math.max(0, Math.min(23 * 60 + 59, Math.round(total)));
-  const h = String(Math.floor(clamped / 60)).padStart(2, '0');
-  const m = String(clamped % 60).padStart(2, '0');
-  return `${h}:${m}`;
-}
-
-function formatDuration(minutes) {
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  if (h > 0 && m > 0) return `${h} godz. ${m} min`;
-  if (h > 0) return `${h} godz.`;
-  return `${m} min`;
-}
-
-/** Wyznacza zakres godzin siatki tygodnia (zaokrąglony do pełnych godzin). */
 function getGridBounds(weekEvents, specialDaysInWeek = []) {
   let startMin = DEFAULT_START_MIN;
   let endMin = DEFAULT_END_MIN;
-
-  for (const e of weekEvents) {
-    const s = toMinutes(e.start);
-    const end = toMinutes(e.end);
-    if (s < startMin) startMin = Math.floor(s / 60) * 60;
-    if (end > endMin) endMin = Math.ceil(end / 60) * 60;
-  }
-
+  const expand = (s, e) => {
+    startMin = Math.min(startMin, Math.floor(s / 60) * 60);
+    endMin = Math.max(endMin, Math.ceil(e / 60) * 60);
+  };
+  for (const e of weekEvents) expand(toMinutes(e.start), toMinutes(e.end));
   for (const sd of specialDaysInWeek) {
-    if (sd?.type === 'rector' && sd.start && sd.end) {
-      const s = toMinutes(sd.start);
-      const end = toMinutes(sd.end);
-      if (s < startMin) startMin = Math.floor(s / 60) * 60;
-      if (end > endMin) endMin = Math.ceil(end / 60) * 60;
-    }
+    if (sd?.type === 'rector' && sd.start && sd.end) expand(toMinutes(sd.start), toMinutes(sd.end));
   }
-
   return { startMin, endMin };
 }
 
-/** Sprawdza, czy dane zajęcia wypadają w trakcie godzin/dnia rektorskiego. */
 function isEventCancelledByRector(event, specialDay) {
-  if (specialDay?.type !== 'rector') return false;
-  if (!event.subjectId) return false; // Wydarzenia własne (np. dentysta) nie przepadają
+  if (specialDay?.type !== 'rector' || !event.subjectId) return false;
   if (!specialDay.start || !specialDay.end) return true;
-  return (
-    toMinutes(event.start) < toMinutes(specialDay.end) &&
-    toMinutes(event.end) > toMinutes(specialDay.start)
-  );
+  return toMinutes(event.start) < toMinutes(specialDay.end) && toMinutes(event.end) > toMinutes(specialDay.start);
 }
 
-/** Oblicza wpływ godzin/dnia rektorskiego na plan dnia oraz ile czasu jest wolnego. */
 function describeRectorImpact(dayEvents, specialDay) {
-  const isFullDayRector = !specialDay.start || !specialDay.end;
   const classEvents = dayEvents.filter((e) => Boolean(e.subjectId));
   const cancelled = classEvents.filter((e) => isEventCancelledByRector(e, specialDay));
   const active = classEvents.filter((e) => !isEventCancelledByRector(e, specialDay));
 
-  if (isFullDayRector) {
+  if (!specialDay.start || !specialDay.end) {
     return {
       fullDayFree: true,
       cancelledCount: cancelled.length,
       title: 'Wolny dzień · Dzień rektorski',
       hoursLabel: 'Cały dzień',
-      freeSummary: cancelled.length
-        ? `Wszystkie zajęcia (${cancelled.length}) odwołane — cały dzień wolny`
-        : 'Cały dzień wolny od zajęć',
+      freeSummary: cancelled.length ? `Wszystkie zajęcia (${cancelled.length}) odwołane — cały dzień wolny` : 'Cały dzień wolny od zajęć',
     };
   }
 
@@ -519,88 +490,63 @@ function describeRectorImpact(dayEvents, specialDay) {
 
   const before = active.filter((e) => toMinutes(e.end) <= rStart);
   const after = active.filter((e) => toMinutes(e.start) >= rEnd);
+  let freeSummary;
 
-  let freeSummary = '';
-  if (before.length > 0 && after.length > 0) {
-    const freeFrom = Math.max(...before.map((e) => toMinutes(e.end)));
-    const freeUntil = Math.min(...after.map((e) => toMinutes(e.start)));
-    const freeMin = Math.max(0, freeUntil - freeFrom);
-    freeSummary = `Wolne między zajęciami: ${formatDuration(freeMin)} (${fromMinutes(freeFrom)} – ${fromMinutes(freeUntil)})`;
-  } else if (before.length > 0 && after.length === 0) {
-    const freeFrom = Math.max(...before.map((e) => toMinutes(e.end)));
-    freeSummary = cancelled.length
-      ? `Końcowe zajęcia przepadają — wolne od ${fromMinutes(freeFrom)} do końca dnia`
-      : `Wolne od ${fromMinutes(freeFrom)} do końca dnia`;
-  } else if (before.length === 0 && after.length > 0) {
-    const freeUntil = Math.min(...after.map((e) => toMinutes(e.start)));
-    freeSummary = cancelled.length
-      ? `Poranne zajęcia przepadają — wolne do ${fromMinutes(freeUntil)}`
-      : `Wolny poranek — zajęcia od ${fromMinutes(freeUntil)}`;
+  if (before.length && after.length) {
+    const from = Math.max(...before.map((e) => toMinutes(e.end)));
+    const until = Math.min(...after.map((e) => toMinutes(e.start)));
+    freeSummary = `Wolne między zajęciami: ${formatDuration(Math.max(0, until - from))} (${fromMinutes(from)} – ${fromMinutes(until)})`;
+  } else if (before.length) {
+    const from = Math.max(...before.map((e) => toMinutes(e.end)));
+    freeSummary = cancelled.length ? `Końcowe zajęcia przepadają — wolne od ${fromMinutes(from)} do końca dnia` : `Wolne od ${fromMinutes(from)} do końca dnia`;
+  } else if (after.length) {
+    const until = Math.min(...after.map((e) => toMinutes(e.start)));
+    freeSummary = cancelled.length ? `Poranne zajęcia przepadają — wolne do ${fromMinutes(until)}` : `Wolny poranek — zajęcia od ${fromMinutes(until)}`;
   } else {
     freeSummary = `Wolne: ${formatDuration(rEnd - rStart)} (${specialDay.start} – ${specialDay.end})`;
   }
 
-  return {
-    fullDayFree: false,
-    cancelledCount: cancelled.length,
-    title: 'Godziny rektorskie',
-    hoursLabel,
-    freeSummary,
-  };
+  return { fullDayFree: false, cancelledCount: cancelled.length, title: 'Godziny rektorskie', hoursLabel, freeSummary };
 }
 
-/** Wylicza okienka (wolne przerwy) pomiędzy zajęciami w danym dniu. */
 function computeGaps(dayEvents) {
   if (dayEvents.length < 2) return [];
-
-  const intervals = dayEvents
-    .map((e) => ({ start: toMinutes(e.start), end: toMinutes(e.end) }))
+  const intervals = dayEvents.map((e) => ({ start: toMinutes(e.start), end: toMinutes(e.end) }))
     .sort((a, b) => a.start - b.start || a.end - b.end);
 
   const merged = [intervals[0]];
   for (let i = 1; i < intervals.length; i++) {
     const prev = merged[merged.length - 1];
-    const cur = intervals[i];
-    if (cur.start <= prev.end) {
-      prev.end = Math.max(prev.end, cur.end);
-    } else {
-      merged.push({ ...cur });
-    }
+    if (intervals[i].start <= prev.end) prev.end = Math.max(prev.end, intervals[i].end);
+    else merged.push({ ...intervals[i] });
   }
 
   const gaps = [];
   for (let i = 0; i < merged.length - 1; i++) {
-    const gapStart = merged[i].end;
-    const gapEnd = merged[i + 1].start;
-    const durationMin = gapEnd - gapStart;
-    if (durationMin > 0) {
-      gaps.push({ startMin: gapStart, endMin: gapEnd, durationMin });
-    }
+    const durationMin = merged[i + 1].start - merged[i].end;
+    if (durationMin > 0) gaps.push({ startMin: merged[i].end, endMin: merged[i + 1].start, durationMin });
   }
   return gaps;
 }
 
-/** Rozkłada nakładające się zajęcia w kolumny obok siebie. */
 function layoutDayEvents(dayEvents) {
-  const sorted = [...dayEvents].sort(
-    (a, b) => toMinutes(a.start) - toMinutes(b.start) || toMinutes(b.end) - toMinutes(a.end),
-  );
+  const sorted = [...dayEvents].sort((a, b) => toMinutes(a.start) - toMinutes(b.start) || toMinutes(b.end) - toMinutes(a.end));
   const clusters = [];
-  let currentCluster = [];
+  let current = [];
   let clusterEnd = -1;
 
   for (const ev of sorted) {
     const s = toMinutes(ev.start);
     const e = toMinutes(ev.end);
-    if (currentCluster.length && s >= clusterEnd) {
-      clusters.push(currentCluster);
-      currentCluster = [];
+    if (current.length && s >= clusterEnd) {
+      clusters.push(current);
+      current = [];
       clusterEnd = -1;
     }
-    currentCluster.push(ev);
+    current.push(ev);
     clusterEnd = Math.max(clusterEnd, e);
   }
-  if (currentCluster.length) clusters.push(currentCluster);
+  if (current.length) clusters.push(current);
 
   const result = new Map();
   for (const cluster of clusters) {
@@ -618,9 +564,8 @@ function layoutDayEvents(dayEvents) {
       }
       placement.push({ ev, col });
     }
-    const totalCols = colEnds.length;
     for (const { ev, col } of placement) {
-      result.set(ev.id, { col, totalCols, overlaps: totalCols > 1 });
+      result.set(ev.id, { col, totalCols: colEnds.length, overlaps: colEnds.length > 1 });
     }
   }
   return result;
@@ -629,89 +574,62 @@ function layoutDayEvents(dayEvents) {
 function renderTimeColumn(gridStartMin, gridEndMin) {
   const col = node('aside', 'time-col');
   col.setAttribute('aria-hidden', 'true');
-
   const head = node('div', 'time-head');
   head.innerHTML = '<i class="ph ph-clock"></i><span>Godz.</span>';
   col.append(head);
 
-  const totalSlots = (gridEndMin - gridStartMin) / SLOT_MINUTES;
   const slots = node('div', 'time-slots');
-  slots.style.height = `${totalSlots * SLOT_HEIGHT_PX}px`;
+  slots.style.height = `${((gridEndMin - gridStartMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX}px`;
 
-  let slotIndex = 0;
-  for (let m = gridStartMin; m < gridEndMin; m += SLOT_MINUTES, slotIndex++) {
-    const isFullHour = m % 60 === 0;
-    const isQuarter = m % 15 === 0;
-    const label = isFullHour ? fromMinutes(m) : `:${String(m % 60).padStart(2, '0')}`;
-    const slotClass = isFullHour
-      ? 'time-slot hour'
-      : isQuarter
-        ? 'time-slot quarter'
-        : 'time-slot five';
-    const slotEl = node('div', slotClass, label);
-    slotEl.style.top = `${slotIndex * SLOT_HEIGHT_PX}px`;
+  for (let m = gridStartMin, idx = 0; m < gridEndMin; m += SLOT_MINUTES, idx++) {
+    const tier = slotTier(m);
+    const label = tier === 'hour' ? fromMinutes(m) : `:${String(m % 60).padStart(2, '0')}`;
+    const slotEl = node('div', `time-slot ${tier}`, label);
+    slotEl.style.top = `${idx * SLOT_HEIGHT_PX}px`;
     slotEl.style.height = `${SLOT_HEIGHT_PX}px`;
     slots.append(slotEl);
   }
-
   col.append(slots);
   return col;
 }
 
-/**
- * Buduje szablon linii 5-minutowych dla kolumny dnia oparty na rzeczywistych
- * obramowaniach CSS (border-top) i identycznych współrzędnych top jak kolumna
- * godzin — dzięki temu przy skalowaniu przeglądarki (np. 90%, 80%, 110%) linie
- * nigdy nie znikają ani nie rozjeżdżają się względem osi godzin i bloków zajęć.
- */
 function buildTimelineGridTemplate(gridStartMin, gridEndMin) {
   const grid = node('div', 'timeline-grid');
   grid.setAttribute('aria-hidden', 'true');
-
-  let slotIndex = 0;
-  for (let m = gridStartMin; m < gridEndMin; m += SLOT_MINUTES, slotIndex++) {
-    const isFullHour = m % 60 === 0;
-    const isQuarter = m % 15 === 0;
-    const slotClass = isFullHour
-      ? 'timeline-slot hour'
-      : isQuarter
-        ? 'timeline-slot quarter'
-        : 'timeline-slot five';
-    const row = node('div', slotClass);
-    row.style.top = `${slotIndex * SLOT_HEIGHT_PX}px`;
+  for (let m = gridStartMin, idx = 0; m < gridEndMin; m += SLOT_MINUTES, idx++) {
+    const row = node('div', `timeline-slot ${slotTier(m)}`);
+    row.style.top = `${idx * SLOT_HEIGHT_PX}px`;
     row.style.height = `${SLOT_HEIGHT_PX}px`;
     grid.append(row);
   }
-
   return grid;
 }
 
 function renderMobileDayTabs(weekEvents, specialDayMap) {
   const nav = $('mobileDayTabs');
   nav.replaceChildren();
+  const todayStr = today();
 
   for (let i = 0; i < 7; i++) {
     const date = addDays(week, i);
     const dayEvs = weekEvents.filter((e) => e.date === date);
-    const effectiveSpecial = specialDayMap.get(date) || holidayFor(date, state.plan.academicYear);
-    const isHoliday = effectiveSpecial?.type === 'holiday';
-    const isSession = effectiveSpecial?.type === 'session';
-
-    let cls = 'mobile-day-tab';
-    if (i === selectedDayIndex) cls += ' active';
-    if (date === today()) cls += ' is-today';
-    if (isHoliday) cls += ' is-holiday';
-    if (isSession) cls += ' is-session';
+    const eff = specialDayMap.get(date) || holidayFor(date, state.plan.academicYear);
+    const cls = [
+      'mobile-day-tab',
+      i === selectedDayIndex && 'active',
+      date === todayStr && 'is-today',
+      eff?.type === 'holiday' && 'is-holiday',
+      eff?.type === 'session' && 'is-session',
+    ].filter(Boolean).join(' ');
 
     const btn = node('button', cls);
     btn.type = 'button';
     btn.setAttribute('aria-pressed', String(i === selectedDayIndex));
-
-    const code = node('span', 'tab-code', MOBILE_DAY_CODES[i]);
-    const num = node('span', 'tab-num', date.slice(8));
-    const dot = node('span', dayEvs.length ? 'tab-dot has-events' : 'tab-dot');
-    btn.append(code, num, dot);
-
+    btn.append(
+      node('span', 'tab-code', MOBILE_DAY_CODES[i]),
+      node('span', 'tab-num', date.slice(8)),
+      node('span', dayEvs.length ? 'tab-dot has-events' : 'tab-dot'),
+    );
     btn.onclick = () => {
       if (i !== selectedDayIndex) {
         mobileSlideDir = i > selectedDayIndex ? 'slide-next' : 'slide-prev';
@@ -733,9 +651,8 @@ function refreshSpecialDayMarquees() {
 
     const overflowPx = inner.scrollWidth - outer.clientWidth;
     if (overflowPx > 3) {
-      const durationSec = Math.max(5.5, Math.min(14, overflowPx / 12 + 4));
       outer.style.setProperty('--marquee-shift', `-${overflowPx + 6}px`);
-      outer.style.setProperty('--marquee-time', `${durationSec.toFixed(1)}s`);
+      outer.style.setProperty('--marquee-time', `${Math.max(5.5, Math.min(14, overflowPx / 12 + 4)).toFixed(1)}s`);
       outer.classList.add('is-overflowing');
     }
   }
@@ -743,12 +660,10 @@ function refreshSpecialDayMarquees() {
 
 function updateLiveTimeIndicator() {
   const timeStr = nowTimeLabel();
-  const topClock = $('liveClockText');
-  if (topClock) topClock.textContent = timeStr;
-  const topClockDate = $('liveClockDate');
-  if (topClockDate) {
+  if ($('liveClockText')) $('liveClockText').textContent = timeStr;
+  if ($('liveClockDate')) {
     const rawDate = shortClockDateFormat.format(new Date()).replace(/\./g, '');
-    topClockDate.textContent = rawDate.charAt(0).toUpperCase() + rawDate.slice(1);
+    $('liveClockDate').textContent = rawDate.charAt(0).toUpperCase() + rawDate.slice(1);
   }
 
   const currentToday = today();
@@ -764,18 +679,13 @@ function updateLiveTimeIndicator() {
   for (const line of document.querySelectorAll('[data-now-line]')) {
     const badge = line.querySelector('[data-now-badge]');
     const hasEvents = line.dataset.hasEvents === 'true';
-    const lastEndRaw = line.dataset.lastEndMin;
-    const lastEndMin = lastEndRaw ? Number(lastEndRaw) : null;
+    const lastEndMin = line.dataset.lastEndMin ? Number(line.dataset.lastEndMin) : null;
     const allFinished = hasEvents && lastEndMin !== null && nowMin >= lastEndMin;
     const outOfGrid = nowMin < startMin || nowMin >= endMin;
 
-    // Ukrywamy pasek na siatce, gdy zajęcia na dziś już się skończyły, dzień jest pusty lub jesteśmy poza siatką godzin
-    if (!hasEvents || allFinished || outOfGrid) {
-      line.hidden = true;
-    } else {
-      line.hidden = false;
-      const topPx = ((nowMin - startMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX;
-      line.style.top = `${topPx}px`;
+    line.hidden = !hasEvents || allFinished || outOfGrid;
+    if (!line.hidden) {
+      line.style.top = `${((nowMin - startMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX}px`;
       if (badge) badge.textContent = `Teraz · ${timeStr}`;
     }
 
@@ -784,18 +694,12 @@ function updateLiveTimeIndicator() {
     if (donePill) {
       donePill.hidden = !allFinished;
       daySection.classList.toggle('has-today-done', allFinished);
-      const cal = $('calendar');
-      if (cal) {
-        const hasBoth = allFinished && Boolean(daySection.querySelector('.special-day-badge'));
-        cal.classList.toggle('has-today-done-stack', hasBoth);
-      }
+      $('calendar')?.classList.toggle('has-today-done-stack', allFinished && Boolean(daySection.querySelector('.special-day-badge')));
     }
   }
 
   for (const evEl of document.querySelectorAll('.day.today .event[data-start-min]')) {
-    const evStart = Number(evEl.dataset.startMin);
-    const evEnd = Number(evEl.dataset.endMin);
-    evEl.classList.toggle('is-now', nowMin >= evStart && nowMin < evEnd);
+    evEl.classList.toggle('is-now', nowMin >= Number(evEl.dataset.startMin) && nowMin < Number(evEl.dataset.endMin));
   }
 }
 
@@ -807,14 +711,13 @@ function render() {
 
   const events = state.plan.events.filter((e) => e.date >= week && e.date <= weekEnd);
   const minutes = events.reduce((sum, e) => sum + toMinutes(e.end) - toMinutes(e.start), 0);
-
-  const specialDays = state.plan.academicYear?.specialDays || [];
-  const specialDayMap = new Map(specialDays.map((sd) => [sd.date, sd]));
+  const specialDayMap = new Map((state.plan.academicYear?.specialDays || []).map((sd) => [sd.date, sd]));
 
   let weekHasSpecialDay = false;
   let totalGapCount = 0;
   let totalGapMinutes = 0;
   const weekSpecialDays = [];
+
   for (let i = 0; i < 7; i++) {
     const d = addDays(week, i);
     const eff = specialDayMap.get(d) || holidayFor(d, state.plan.academicYear);
@@ -822,17 +725,14 @@ function render() {
       weekHasSpecialDay = true;
       weekSpecialDays.push(eff);
     }
-    const dayEvs = events.filter((e) => e.date === d);
-    for (const g of computeGaps(dayEvs)) {
+    for (const g of computeGaps(events.filter((e) => e.date === d))) {
       totalGapCount++;
       totalGapMinutes += g.durationMin;
     }
   }
 
-  const gapSummary =
-    totalGapCount > 0 ? ` · Okienka: ${totalGapCount} (${formatDuration(totalGapMinutes)})` : '';
-  $('summary').textContent =
-    `Liczba spotkań: ${events.length} · Łącznie zajęć: ${formatDuration(minutes)}${gapSummary}`;
+  const gapSummary = totalGapCount > 0 ? ` · Okienka: ${totalGapCount} (${formatDuration(totalGapMinutes)})` : '';
+  $('summary').textContent = `Liczba spotkań: ${events.length} · Łącznie zajęć: ${formatDuration(minutes)}${gapSummary}`;
 
   renderMobileDayTabs(events, specialDayMap);
 
@@ -842,16 +742,15 @@ function render() {
 
   const calendar = $('calendar');
   calendar.classList.toggle('has-special-days', weekHasSpecialDay);
-  calendar.replaceChildren();
-  calendar.append(renderTimeColumn(startMin, endMin));
+  calendar.replaceChildren(renderTimeColumn(startMin, endMin));
 
   const slideClass = mobileSlideDir;
   mobileSlideDir = '';
 
   for (let i = 0; i < 7; i++) {
     const date = addDays(week, i);
-    const effectiveSpecial = specialDayMap.get(date) || holidayFor(date, state.plan.academicYear);
-    const dayEl = renderDay(date, DAY_NAMES[i], events, effectiveSpecial, startMin, endMin, gridTemplate);
+    const eff = specialDayMap.get(date) || holidayFor(date, state.plan.academicYear);
+    const dayEl = renderDay(date, DAY_NAMES[i], events, eff, startMin, endMin, gridTemplate);
     if (i === selectedDayIndex) {
       dayEl.classList.add('mobile-active');
       if (slideClass) dayEl.classList.add(slideClass);
@@ -863,46 +762,42 @@ function render() {
   requestAnimationFrame(refreshSpecialDayMarquees);
 }
 
+function formatSpecialBadge(sd) {
+  if (sd.type === 'holiday') return { icon: 'ph-sun-horizon', text: sd.label || 'Dzień wolny' };
+  if (sd.type === 'session') return { icon: 'ph-scroll', text: sd.label || 'Sesja egzaminacyjna' };
+  const suffix = sd.label ? ` · ${sd.label}` : '';
+  if (sd.type === 'swap') {
+    return { icon: 'ph-arrows-clockwise', text: `Plan z ${DAY_KEY_NAMES[sd.targetDay] || sd.targetDay}${suffix}` };
+  }
+  const hours = sd.start && sd.end ? `Rektorskie ${sd.start}–${sd.end}` : 'Dzień rektorski';
+  return { icon: 'ph-graduation-cap', text: `${hours}${suffix}` };
+}
+
 function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndMin, gridTemplate) {
   const isHoliday = specialDay?.type === 'holiday';
-  const isSwap = specialDay?.type === 'swap';
   const isRector = specialDay?.type === 'rector';
   const isSession = specialDay?.type === 'session';
   const isToday = date === today();
-  const canAddInDay = editMode;
 
-  let dayClass = 'day';
-  if (isToday) dayClass += ' today';
-  if (isHoliday) dayClass += ' holiday';
-  if (isSession) dayClass += ' session';
-  if (isRector) dayClass += ' rector-day';
-
-  const day = node('section', dayClass);
-
+  const day = node('section', ['day', isToday && 'today', isHoliday && 'holiday', isSession && 'session', isRector && 'rector-day'].filter(Boolean).join(' '));
   const topWrap = node('div', 'day-top');
-  const head = node('div', canAddInDay ? 'dayhead editable' : 'dayhead');
+  const head = node('div', editMode ? 'dayhead editable' : 'dayhead');
   const headInfo = node('div', 'dayhead-info');
   headInfo.append(node('span', '', dayName), node('strong', '', date.slice(8)));
   head.append(headInfo);
 
-  if (canAddInDay) {
+  if (editMode) {
     head.title = isHoliday
       ? `Dzień wolny (${date}) — kliknij, aby dodać wydarzenie własne (poza przedmiotem)`
       : isSession
         ? `Sesja egzaminacyjna (${date}) — kliknij, aby dodać egzamin, poprawkę lub zaliczenie`
         : `Kliknij, aby dodać zajęcia w dniu ${date} (${dayName})`;
     head.onclick = () => openEventDialog(null, date);
-
     const addHint = node('span', 'dayhead-add');
     addHint.innerHTML = '<i class="ph ph-plus"></i>';
-    addHint.title = isHoliday
-      ? 'Dodaj wydarzenie własne'
-      : isSession
-        ? 'Dodaj egzamin / zaliczenie'
-        : 'Dodaj zajęcia w tym dniu';
+    addHint.title = isHoliday ? 'Dodaj wydarzenie własne' : isSession ? 'Dodaj egzamin / zaliczenie' : 'Dodaj zajęcia w tym dniu';
     head.append(addHint);
   }
-
   topWrap.append(head);
 
   if (isToday) {
@@ -914,65 +809,28 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
     topWrap.append(donePill);
   }
 
-  // Oznaczenie dnia specjalnego (święto, weekend, sesja, godziny rektorskie lub plan z innego dnia)
   if (specialDay) {
-    const badge = node('div', `special-day-badge ${specialDay.type}`);
-    let iconClass = 'ph-sun-horizon';
-    let badgeText = '';
-
-    if (isHoliday) {
-      iconClass = 'ph-sun-horizon';
-      badgeText = specialDay.label || 'Dzień wolny';
-    } else if (isSession) {
-      iconClass = 'ph-scroll';
-      badgeText = specialDay.label || 'Sesja egzaminacyjna';
-    } else if (isSwap) {
-      iconClass = 'ph-arrows-clockwise';
-      const targetName = DAY_KEY_NAMES[specialDay.targetDay] || specialDay.targetDay;
-      const labelSuffix = specialDay.label ? ` · ${specialDay.label}` : '';
-      badgeText = `Plan z ${targetName}${labelSuffix}`;
-    } else if (isRector) {
-      iconClass = 'ph-graduation-cap';
-      const hoursPart =
-        specialDay.start && specialDay.end
-          ? `Rektorskie ${specialDay.start}–${specialDay.end}`
-          : 'Dzień rektorski';
-      const labelSuffix = specialDay.label ? ` · ${specialDay.label}` : '';
-      badgeText = `${hoursPart}${labelSuffix}`;
-    }
-
-    const iconEl = node('i', `ph ${iconClass}`);
+    const { icon, text } = formatSpecialBadge(specialDay);
+    const badge = node('div', `special-day-badge ${specialDay.type}${editMode ? ' editable' : ''}`);
     const labelOuter = node('span', 'special-day-label');
-    const labelInner = node('span', 'special-day-label-inner', badgeText);
-    labelOuter.append(labelInner);
-    badge.append(iconEl, labelOuter);
-    badge.title = editMode ? `${badgeText} — kliknij, aby zarządzać strukturą roku` : badgeText;
-
-    if (editMode) {
-      badge.classList.add('editable');
-      badge.onclick = () => openAcademicYearDialog();
-    }
+    labelOuter.append(node('span', 'special-day-label-inner', text));
+    badge.append(node('i', `ph ${icon}`), labelOuter);
+    badge.title = editMode ? `${text} — kliknij, aby zarządzać strukturą roku` : text;
+    if (editMode) badge.onclick = openAcademicYearDialog;
     topWrap.append(badge);
   }
 
   day.append(topWrap);
 
-  const dayEvents = weekEvents
-    .filter((e) => e.date === date)
-    .sort((a, b) => a.start.localeCompare(b.start));
-
+  const dayEvents = weekEvents.filter((e) => e.date === date).sort((a, b) => a.start.localeCompare(b.start));
   const rectorImpact = isRector ? describeRectorImpact(dayEvents, specialDay) : null;
-
   const totalSlots = (gridEndMin - gridStartMin) / SLOT_MINUTES;
-  let timelineClass = canAddInDay ? 'day-timeline editable' : 'day-timeline';
-  if (rectorImpact?.fullDayFree) timelineClass += ' rector-full-free';
-  const timeline = node('div', timelineClass);
-  timeline.style.height = `${totalSlots * SLOT_HEIGHT_PX}px`;
-  if (gridTemplate) {
-    timeline.append(gridTemplate.cloneNode(true));
-  }
 
-  if (canAddInDay) {
+  const timeline = node('div', `day-timeline${editMode ? ' editable' : ''}${rectorImpact?.fullDayFree ? ' rector-full-free' : ''}`);
+  timeline.style.height = `${totalSlots * SLOT_HEIGHT_PX}px`;
+  if (gridTemplate) timeline.append(gridTemplate.cloneNode(true));
+
+  if (editMode) {
     timeline.title = isHoliday
       ? 'Kliknij w wiersz godziny, aby dodać wydarzenie własne o tej porze'
       : isSession
@@ -981,96 +839,61 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
     timeline.onclick = (e) => {
       if (e.target !== timeline) return;
       const slotIndex = Math.max(0, Math.min(totalSlots - 2, Math.floor(e.offsetY / SLOT_HEIGHT_PX)));
-      const clickedMin = gridStartMin + slotIndex * SLOT_MINUTES;
-      openEventDialog(null, date, fromMinutes(clickedMin));
+      openEventDialog(null, date, fromMinutes(gridStartMin + slotIndex * SLOT_MINUTES));
     };
   }
 
-  // Renderowanie okienek między zajęciami (z odstępem od sąsiadujących bloków zajęć)
   const GAP_INSET_PX = 3;
   for (const gap of computeGaps(dayEvents)) {
-    const topPx = ((gap.startMin - gridStartMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX + GAP_INSET_PX;
-    const heightPx = Math.max(
-      SLOT_HEIGHT_PX - GAP_INSET_PX * 2,
-      (gap.durationMin / SLOT_MINUTES) * SLOT_HEIGHT_PX - GAP_INSET_PX * 2,
-    );
-    let gapClass = 'gap-block';
-    if (
+    const cancelled =
       isRector &&
       (rectorImpact?.fullDayFree ||
-        (specialDay.start &&
-          specialDay.end &&
-          gap.startMin < toMinutes(specialDay.end) &&
-          gap.endMin > toMinutes(specialDay.start)))
-    ) {
-      gapClass += ' cancelled-by-rector';
-    }
-    const gapEl = node('div', gapClass);
-    gapEl.style.top = `${topPx}px`;
-    gapEl.style.height = `${heightPx}px`;
-
+        (specialDay.start && specialDay.end && gap.startMin < toMinutes(specialDay.end) && gap.endMin > toMinutes(specialDay.start)));
+    const gapEl = node('div', `gap-block${cancelled ? ' cancelled-by-rector' : ''}`);
+    gapEl.style.top = `${((gap.startMin - gridStartMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX + GAP_INSET_PX}px`;
+    gapEl.style.height = `${Math.max(SLOT_HEIGHT_PX - GAP_INSET_PX * 2, (gap.durationMin / SLOT_MINUTES) * SLOT_HEIGHT_PX - GAP_INSET_PX * 2)}px`;
     const title = node('span', 'gap-title');
     title.innerHTML = '<i class="ph ph-hourglass-low"></i> ';
     title.append(document.createTextNode(`Okienko · ${formatDuration(gap.durationMin)}`));
     gapEl.append(title);
-
-    if (gap.durationMin >= 10) {
-      gapEl.append(node('span', 'gap-time', `${fromMinutes(gap.startMin)} – ${fromMinutes(gap.endMin)}`));
-    }
+    if (gap.durationMin >= 10) gapEl.append(node('span', 'gap-time', `${fromMinutes(gap.startMin)} – ${fromMinutes(gap.endMin)}`));
     timeline.append(gapEl);
   }
 
   const layoutMap = layoutDayEvents(dayEvents);
-  for (const event of dayEvents) {
-    timeline.append(renderEvent(event, layoutMap.get(event.id), gridStartMin, specialDay));
-  }
+  for (const event of dayEvents) timeline.append(renderEvent(event, layoutMap.get(event.id), gridStartMin, specialDay));
 
-  // Pasek aktualnej godziny na żywo (jak w USOS-ie, bez potrzeby odświeżania strony)
   if (isToday) {
     const activeDayEvents = dayEvents.filter((e) => !isEventCancelledByRector(e, specialDay));
-    const lastEndMin = activeDayEvents.length
-      ? Math.max(...activeDayEvents.map((e) => toMinutes(e.end)))
-      : null;
-
+    const lastEndMin = activeDayEvents.length ? Math.max(...activeDayEvents.map((e) => toMinutes(e.end))) : null;
     const nowLine = node('div', 'now-line');
     nowLine.setAttribute('data-now-line', '');
     nowLine.dataset.hasEvents = String(activeDayEvents.length > 0);
     nowLine.dataset.lastEndMin = lastEndMin !== null ? String(lastEndMin) : '';
     nowLine.setAttribute('aria-hidden', 'true');
-    const nowDot = node('span', 'now-dot');
     const nowBadge = node('span', 'now-badge');
     nowBadge.setAttribute('data-now-badge', '');
-    nowLine.append(nowDot, nowBadge);
+    nowLine.append(node('span', 'now-dot'), nowBadge);
     timeline.append(nowLine);
   }
 
-  // Nakładka godzin / dnia rektorskiego
   if (isRector && rectorImpact) {
-    const overlay = node(
-      'div',
-      rectorImpact.fullDayFree ? 'rector-overlay full-day' : 'rector-overlay partial-day',
-    );
+    const overlay = node('div', rectorImpact.fullDayFree ? 'rector-overlay full-day' : 'rector-overlay partial-day');
     if (!rectorImpact.fullDayFree && specialDay.start && specialDay.end) {
       const rStart = Math.max(gridStartMin, toMinutes(specialDay.start));
       const rEnd = Math.min(gridEndMin, toMinutes(specialDay.end));
-      const topPx = ((rStart - gridStartMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX;
-      const heightPx = Math.max(SLOT_HEIGHT_PX * 2, ((rEnd - rStart) / SLOT_MINUTES) * SLOT_HEIGHT_PX);
-      overlay.style.top = `${topPx}px`;
-      overlay.style.height = `${heightPx}px`;
+      overlay.style.top = `${((rStart - gridStartMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX}px`;
+      overlay.style.height = `${Math.max(SLOT_HEIGHT_PX * 2, ((rEnd - rStart) / SLOT_MINUTES) * SLOT_HEIGHT_PX)}px`;
     }
-
     const card = node('div', 'rector-overlay-card');
     const titleEl = node('div', 'rector-overlay-title');
     titleEl.innerHTML = '<i class="ph ph-graduation-cap"></i> ';
     titleEl.append(document.createTextNode(rectorImpact.title));
-    card.append(titleEl);
-
-    const metaText = specialDay.label
-      ? `${rectorImpact.hoursLabel} · ${specialDay.label}`
-      : rectorImpact.hoursLabel;
-    card.append(node('div', 'rector-overlay-meta', metaText));
-    card.append(node('div', 'rector-overlay-free', rectorImpact.freeSummary));
-
+    card.append(
+      titleEl,
+      node('div', 'rector-overlay-meta', specialDay.label ? `${rectorImpact.hoursLabel} · ${specialDay.label}` : rectorImpact.hoursLabel),
+      node('div', 'rector-overlay-free', rectorImpact.freeSummary),
+    );
     overlay.append(card);
     timeline.append(overlay);
   }
@@ -1079,24 +902,15 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
     if (editMode) {
       const emptyBtn = node('button', 'day-empty-btn');
       emptyBtn.type = 'button';
-      emptyBtn.innerHTML = isHoliday
-        ? '<i class="ph ph-plus-circle"></i> Dodaj wydarzenie własne'
-        : isSession
-          ? '<i class="ph ph-plus-circle"></i> Dodaj egzamin / zaliczenie'
-          : '<i class="ph ph-plus-circle"></i> Dodaj zajęcia';
+      emptyBtn.innerHTML = `<i class="ph ph-plus-circle"></i> ${isHoliday ? 'Dodaj wydarzenie własne' : isSession ? 'Dodaj egzamin / zaliczenie' : 'Dodaj zajęcia'}`;
       emptyBtn.onclick = () => openEventDialog(null, date);
       timeline.append(emptyBtn);
-    } else if (isHoliday) {
-      const emptyHoliday = node('div', 'day-empty-overlay');
-      emptyHoliday.innerHTML = '<i class="ph ph-sun-horizon"></i> Dzień wolny od zajęć';
-      timeline.append(emptyHoliday);
-    } else if (isSession) {
-      const emptySession = node('div', 'day-empty-overlay session-empty');
-      emptySession.innerHTML = '<i class="ph ph-scroll"></i> Sesja egzaminacyjna';
-      timeline.append(emptySession);
     } else {
-      const emptyNormal = node('div', 'day-empty-overlay', 'Brak zajęć');
-      timeline.append(emptyNormal);
+      const overlayEl = node('div', `day-empty-overlay${isSession ? ' session-empty' : ''}`);
+      if (isHoliday) overlayEl.innerHTML = '<i class="ph ph-sun-horizon"></i> Dzień wolny od zajęć';
+      else if (isSession) overlayEl.innerHTML = '<i class="ph ph-scroll"></i> Sesja egzaminacyjna';
+      else overlayEl.textContent = 'Brak zajęć';
+      timeline.append(overlayEl);
     }
   }
 
@@ -1104,72 +918,20 @@ function renderDay(date, dayName, weekEvents, specialDay, gridStartMin, gridEndM
   return day;
 }
 
-const CUSTOM_SUBJECT_VALUE = '__custom__';
-
 function getEventDisplay(event) {
   if (event.subjectId) {
-    const subject = state.plan.subjects.find((s) => s.id === event.subjectId);
-    return {
-      title: subject?.name || 'Przedmiot',
-      isCustom: false,
-      subject: subject || null,
-    };
+    const subject = state.plan.subjects.find((s) => s.id === event.subjectId) || null;
+    return { title: subject?.name || 'Przedmiot', isCustom: false, subject };
   }
-  return {
-    title: event.customTitle || 'Wydarzenie',
-    isCustom: true,
-    subject: null,
-  };
+  return { title: event.customTitle || 'Wydarzenie', isCustom: true, subject: null };
 }
 
 function getEventTypeVisual(typeStr, isCustom = false) {
   const t = (typeStr || '').toLowerCase();
-  if (t.includes('poprawk') || t.includes('komis')) {
-    return { variant: 'type-retake', icon: 'ph-arrow-counter-clockwise' };
-  }
-  if (t.includes('egzamin')) {
-    return { variant: 'type-exam', icon: 'ph-scroll' };
-  }
-  if (t.includes('kolokwium') || t.includes('zaliczeni') || t.includes('wejściów') || t.includes('test')) {
-    return { variant: 'type-test', icon: 'ph-check-square-offset' };
-  }
-  if (t.includes('obrona') || t.includes('dyplom')) {
-    return { variant: 'type-defense', icon: 'ph-graduation-cap' };
-  }
-  if (t.includes('wykład') || t.includes('wyklad')) {
-    return { variant: 'type-lecture', icon: 'ph-chalkboard-teacher' };
-  }
-  if (t.includes('lab')) {
-    return { variant: 'type-lab', icon: 'ph-flask' };
-  }
-  if (t.includes('projekt')) {
-    return { variant: 'type-project', icon: 'ph-kanban' };
-  }
-  if (t.includes('ćwicz') || t.includes('cwicz') || t.includes('lektorat') || t.includes('wf')) {
-    return { variant: 'type-exercise', icon: 'ph-pencil-line' };
-  }
-  if (t.includes('seminarium')) {
-    return { variant: 'type-seminar', icon: 'ph-chats-circle' };
-  }
-  if (t.includes('konsultac') || t.includes('promotor') || t.includes('spotkanie')) {
-    return { variant: 'type-consult', icon: 'ph-user-focus' };
-  }
-  if (t.includes('odrabianie')) {
-    return { variant: 'type-makeup', icon: 'ph-clock-clockwise' };
-  }
-  if (t.includes('lekarz') || t.includes('dentyst') || t.includes('prywatn') || t.includes('badani')) {
-    return { variant: 'type-other', icon: 'ph-first-aid-kit' };
-  }
-  if (t.includes('warsztat') || t.includes('szkoleni') || t.includes('kurs') || t.includes('trening')) {
-    return { variant: 'type-exercise', icon: 'ph-wrench' };
-  }
-  if (t.includes('koło') || t.includes('kolo') || t.includes('zebranie') || t.includes('rada')) {
-    return { variant: 'type-consult', icon: 'ph-users-three' };
-  }
-  return {
-    variant: 'type-other',
-    icon: isCustom ? 'ph-calendar-star' : 'ph-tag',
-  };
+  const match = TYPE_VISUAL_RULES.find(([keys]) => keys.some((k) => t.includes(k)));
+  return match
+    ? { variant: match[1], icon: match[2] }
+    : { variant: 'type-other', icon: isCustom ? 'ph-calendar-star' : 'ph-tag' };
 }
 
 function renderEvent(event, layout, gridStartMin, specialDay = null) {
@@ -1180,97 +942,57 @@ function renderEvent(event, layout, gridStartMin, specialDay = null) {
   const durationMin = Math.max(SLOT_MINUTES, endMin - startMin);
   const cancelledByRector = isEventCancelledByRector(event, specialDay);
 
-  const EVENT_INSET_PX = 1;
-  const topPx = ((startMin - gridStartMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX + EVENT_INSET_PX;
-  const heightPx = Math.max(
-    SLOT_HEIGHT_PX - EVENT_INSET_PX * 2,
-    (durationMin / SLOT_MINUTES) * SLOT_HEIGHT_PX - EVENT_INSET_PX * 2,
-  );
-
-  let className = `event ${typeVisual.variant}`;
-  if (event.remote) className += ' remote';
-  if (isCustom) className += ' custom-event';
-  if (cancelledByRector) className += ' cancelled-by-rector';
-  if (durationMin < 20) className += ' compact';
-  else if (durationMin <= 40) className += ' short-block';
-  else if (durationMin <= 55) className += ' medium-block';
-  else className += ' tall-block';
+  const INSET = 1;
+  const sizeClass = durationMin < 20 ? 'compact' : durationMin <= 40 ? 'short-block' : durationMin <= 55 ? 'medium-block' : 'tall-block';
+  const className = [
+    'event',
+    typeVisual.variant,
+    event.remote && 'remote',
+    isCustom && 'custom-event',
+    cancelledByRector && 'cancelled-by-rector',
+    sizeClass,
+  ].filter(Boolean).join(' ');
 
   const button = node('button', className);
   button.type = 'button';
   button.dataset.startMin = String(startMin);
   button.dataset.endMin = String(endMin);
-  button.title = [
-    `${event.start} – ${event.end}`,
-    title,
-    event.type,
-    event.room,
-    event.teacher,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-  button.style.top = `${topPx}px`;
-  button.style.height = `${heightPx}px`;
+  button.title = [`${event.start} – ${event.end}`, title, event.type, event.room, event.teacher].filter(Boolean).join(' · ');
+  button.style.top = `${((startMin - gridStartMin) / SLOT_MINUTES) * SLOT_HEIGHT_PX + INSET}px`;
+  button.style.height = `${Math.max(SLOT_HEIGHT_PX - INSET * 2, (durationMin / SLOT_MINUTES) * SLOT_HEIGHT_PX - INSET * 2)}px`;
 
   const { col = 0, totalCols = 1, overlaps = false } = layout || {};
   const widthPct = 100 / totalCols;
-  const leftPct = col * widthPct;
-  button.style.left = `calc(${leftPct}% + 3px)`;
+  button.style.left = `calc(${col * widthPct}% + 3px)`;
   button.style.width = `calc(${widthPct}% - 6px)`;
 
   const topRow = node('div', 'event-top-row');
   topRow.append(node('span', 'time', `${event.start} – ${event.end}`));
-
-  if (cancelledByRector) {
-    const rectorTag = node('span', 'rector-tag');
-    rectorTag.innerHTML = '<i class="ph ph-graduation-cap"></i><span>Odwołane</span>';
-    topRow.append(rectorTag);
-  }
-  if (isCustom) {
-    const customTag = node('span', 'custom-tag');
-    customTag.innerHTML = '<i class="ph ph-star-four"></i><span>Własne</span>';
-    topRow.append(customTag);
-  }
-  if (event.remote) {
-    const remoteTag = node('span', 'remote-tag');
-    remoteTag.innerHTML = '<i class="ph ph-laptop"></i><span>Zdalnie</span>';
-    topRow.append(remoteTag);
-  }
+  if (cancelledByRector) topRow.append(iconTag('rector-tag', 'ph-graduation-cap', 'Odwołane'));
+  if (isCustom) topRow.append(iconTag('custom-tag', 'ph-star-four', 'Własne'));
+  if (event.remote) topRow.append(iconTag('remote-tag', 'ph-laptop', 'Zdalnie'));
 
   button.append(topRow, node('span', 'name', title));
-
-  if (event.room || event.teacher) {
-    button.append(node('span', 'meta', [event.room, event.teacher].filter(Boolean).join(' · ')));
-  }
-
-  const typeTag = node('span', `type-tag ${typeVisual.variant}`);
-  typeTag.innerHTML = `<i class="ph ${typeVisual.icon}"></i>`;
-  typeTag.append(node('span', '', event.type));
-  button.append(typeTag);
-
+  if (event.room || event.teacher) button.append(node('span', 'meta', [event.room, event.teacher].filter(Boolean).join(' · ')));
+  button.append(iconTag(`type-tag ${typeVisual.variant}`, typeVisual.icon, event.type));
   if (overlaps) button.append(node('span', 'meta', '⚠ Nakładające się godziny'));
-
   if (event.notes) button.append(node('span', 'meta', event.notes));
 
   button.onclick = (e) => {
     e.stopPropagation();
-    if (editMode) {
-      openEventDialog(event.id);
-    } else {
-      openEventDetailsDialog(event.id);
-    }
+    if (editMode) openEventDialog(event.id);
+    else openEventDetailsDialog(event.id);
   };
   return button;
 }
 
-// --- Szczegóły zajęć (w trybie przeglądania) ---------------------------------
+// --- Szczegóły zajęć ---------------------------------------------------------
 
 function openEventDetailsDialog(id) {
   const event = state.plan.events.find((e) => e.id === id);
   if (!event) return;
   const { title, isCustom, subject } = getEventDisplay(event);
   const typeVisual = getEventTypeVisual(event.type, isCustom);
-
   detailsEventId = event.id;
 
   $('detailsSubjectName').textContent = title;
@@ -1280,41 +1002,29 @@ function openEventDetailsDialog(id) {
   $('detailsRemote').hidden = !event.remote;
   $('detailsDate').textContent = formatFullDate(event.date);
   $('detailsTime').textContent = `${event.start} – ${event.end} (${formatDuration(toMinutes(event.end) - toMinutes(event.start))})`;
-
   $('detailsRoom').textContent = event.room || 'Nie podano';
   $('detailsTeacher').textContent = event.teacher || 'Nie podano';
   $('detailsRoomRow').hidden = isCustom && !event.room;
   $('detailsTeacherRow').hidden = isCustom && !event.teacher;
 
-  const hasNotes = !!event.notes?.trim();
-  $('detailsNotesSection').hidden = !hasNotes;
+  $('detailsNotesSection').hidden = !event.notes?.trim();
   renderRichTextWithLinks($('detailsNotes'), event.notes || '');
-  $('copyEventNotesBtn').onclick = () =>
-    copyTextWithFeedback(event.notes || '', $('copyEventNotesBtn'), 'Kopiuj notatkę');
+  $('copyEventNotesBtn').onclick = () => copyTextWithFeedback(event.notes || '', $('copyEventNotesBtn'), 'Kopiuj notatkę');
 
   if (isCustom || !subject) {
     $('detailsSubjectSection').hidden = true;
     $('detailsEditSubjectBtn').hidden = true;
   } else {
     $('detailsEditSubjectBtn').hidden = false;
-    $('detailsSubjectSection').hidden = !setSubjectDetailsContent(subject.details);
-    $('copySubjectDetailsBtn').hidden = !subject.details?.trim();
-    $('copySubjectDetailsBtn').onclick = () =>
-      copyTextWithFeedback(subject.details || '', $('copySubjectDetailsBtn'), 'Kopiuj opis');
+    $('detailsSubjectSection').hidden = false;
+    const text = (subject.details || '').trim();
+    if (text) renderRichTextWithLinks($('detailsSubjectInfo'), text);
+    else $('detailsSubjectInfo').textContent = 'Brak opisu przedmiotu. Możesz go dodać przyciskiem „Edytuj opis przedmiotu”.';
+    $('copySubjectDetailsBtn').hidden = !text;
+    $('copySubjectDetailsBtn').onclick = () => copyTextWithFeedback(subject.details || '', $('copySubjectDetailsBtn'), 'Kopiuj opis');
   }
 
   showDialogModal($('eventDetailsDialog'));
-}
-
-function setSubjectDetailsContent(details) {
-  const text = (details || '').trim();
-  if (text) {
-    renderRichTextWithLinks($('detailsSubjectInfo'), text);
-  } else {
-    $('detailsSubjectInfo').textContent =
-      'Brak opisu przedmiotu. Możesz go dodać przyciskiem „Edytuj opis przedmiotu”.';
-  }
-  return true;
 }
 
 // --- Przedmioty --------------------------------------------------------------
@@ -1329,31 +1039,30 @@ function fillSubjectForm(subject) {
 function renderSubjectList() {
   const list = $('subjectList');
   list.replaceChildren();
-
   for (const subject of state.plan.subjects) {
     const row = node('div', 'subjectrow');
-
     const info = node('div', 'subjectrow-info');
     const nameRow = node('div', 'subjectrow-name');
-    const icon = node('i', 'ph ph-book-bookmark');
-    nameRow.append(icon, node('span', '', subject.name));
+    nameRow.append(node('i', 'ph ph-book-bookmark'), node('span', '', subject.name));
     info.append(nameRow);
+    if (subject.details) info.append(node('div', 'subjectrow-details', subject.details));
 
-    if (subject.details) {
-      info.append(node('div', 'subjectrow-details', subject.details));
-    }
+    const editBtn = node('button', '', 'Edytuj');
+    editBtn.type = 'button';
+    editBtn.onclick = () => fillSubjectForm(subject);
+    const delBtn = node('button', 'danger', 'Usuń');
+    delBtn.type = 'button';
+    delBtn.onclick = () => deleteSubject(subject);
 
-    const editButton = node('button', '', 'Edytuj');
-    editButton.type = 'button';
-    const deleteButton = node('button', 'danger', 'Usuń');
-    deleteButton.type = 'button';
-
-    editButton.onclick = () => fillSubjectForm(subject);
-    deleteButton.onclick = () => deleteSubject(subject);
-
-    row.append(info, editButton, deleteButton);
+    row.append(info, editBtn, delBtn);
     list.append(row);
   }
+}
+
+function resetSubjectForm() {
+  $('subjectForm').reset();
+  $('subjectId').value = '';
+  $('subjectDetails').value = '';
 }
 
 function openSubjectDialog(message = '', subjectToEdit = null) {
@@ -1364,27 +1073,13 @@ function openSubjectDialog(message = '', subjectToEdit = null) {
   showDialogModal($('subjectDialog'));
 }
 
-function resetSubjectForm() {
-  $('subjectForm').reset();
-  $('subjectId').value = '';
-  $('subjectDetails').value = '';
-}
-
 function deleteSubject(subject) {
   try {
-    const subjectEventsCount = state.plan.events.filter((e) => e.subjectId === subject.id).length;
-    if (subjectEventsCount > 0) {
-      if (
-        !confirm(
-          `Przedmiot „${subject.name}” ma przypisane zajęcia (${subjectEventsCount} spotkań). Czy usunąć ten przedmiot razem ze wszystkimi jego zajęciami?`,
-        )
-      ) {
-        return;
-      }
-    } else if (!confirm(`Usunąć przedmiot „${subject.name}”?`)) {
-      return;
-    }
-
+    const count = state.plan.events.filter((e) => e.subjectId === subject.id).length;
+    const msg = count > 0
+      ? `Przedmiot „${subject.name}” ma przypisane zajęcia (${count} spotkań). Czy usunąć ten przedmiot razem ze wszystkimi jego zajęciami?`
+      : `Usunąć przedmiot „${subject.name}”?`;
+    if (!confirm(msg)) return;
     mutate((plan) => {
       plan.events = plan.events.filter((e) => e.subjectId !== subject.id);
       plan.subjects = plan.subjects.filter((s) => s.id !== subject.id);
@@ -1404,17 +1099,13 @@ function saveSubject(event) {
     const details = $('subjectDetails').value.trim();
 
     mutate((plan) => {
-      const duplicate = plan.subjects.find(
-        (s) => s.id !== id && s.name.toLocaleLowerCase('pl') === name.toLocaleLowerCase('pl'),
-      );
-      if (duplicate) throw Error('Taki przedmiot już istnieje. Dodaj do niego inny typ zajęć.');
-
+      const dup = plan.subjects.find((s) => s.id !== id && s.name.toLocaleLowerCase('pl') === name.toLocaleLowerCase('pl'));
+      if (dup) throw Error('Taki przedmiot już istnieje. Dodaj do niego inny typ zajęć.');
       const subject = details ? { id, name, details } : { id, name };
-      const index = plan.subjects.findIndex((s) => s.id === id);
-      if (index < 0) plan.subjects.push(subject);
-      else plan.subjects[index] = subject;
+      const idx = plan.subjects.findIndex((s) => s.id === id);
+      if (idx < 0) plan.subjects.push(subject);
+      else plan.subjects[idx] = subject;
     });
-
     resetSubjectForm();
     $('subjectError').textContent = '';
     renderSubjectList();
@@ -1423,31 +1114,36 @@ function saveSubject(event) {
   }
 }
 
-// --- Zajęcia -----------------------------------------------------------------
+// --- Zajęcia (formularz i serie) ---------------------------------------------
 
-const EVENT_FIELDS = ['start', 'end', 'room', 'teacher', 'notes'];
-const CUSTOM_TYPE_VALUE = '__custom__';
+function toggleCustomInput(selectEl, inputEl, customValue, focus = false) {
+  const isCustom = selectEl.value === customValue;
+  inputEl.hidden = !isCustom;
+  inputEl.required = isCustom;
+  if (isCustom && focus) inputEl.focus();
+}
+
+function syncCustomSelect(selectEl, inputEl, value, customValue, fallback = '') {
+  const val = (value ?? fallback).trim();
+  const match = Array.from(selectEl.options).find(
+    (opt) => opt.value !== customValue && opt.value.toLowerCase() === val.toLowerCase(),
+  );
+  if (match) {
+    selectEl.value = match.value;
+    inputEl.value = '';
+    inputEl.hidden = true;
+    inputEl.required = false;
+  } else {
+    selectEl.value = customValue;
+    inputEl.value = val;
+    inputEl.hidden = false;
+    inputEl.required = true;
+  }
+}
 
 function setSelectedEventType(typeValue, isCustomEvent = false) {
-  const select = $('typeSelect');
-  const customInput = $('typeCustom');
-  const val = (typeValue || (isCustomEvent ? 'Spotkanie' : 'Laboratorium')).trim();
-
-  const matchingOption = Array.from(select.options).find(
-    (opt) => opt.value !== CUSTOM_TYPE_VALUE && opt.value.toLowerCase() === val.toLowerCase(),
-  );
-
-  if (matchingOption) {
-    select.value = matchingOption.value;
-    customInput.value = '';
-    customInput.hidden = true;
-    customInput.required = false;
-  } else {
-    select.value = CUSTOM_TYPE_VALUE;
-    customInput.value = val;
-    customInput.hidden = false;
-    customInput.required = true;
-  }
+  const fallback = isCustomEvent ? 'Spotkanie' : 'Laboratorium';
+  syncCustomSelect($('typeSelect'), $('typeCustom'), typeValue || fallback, CUSTOM_TYPE_VALUE, fallback);
 }
 
 function getSelectedEventType(isCustomEvent = false) {
@@ -1455,16 +1151,6 @@ function getSelectedEventType(isCustomEvent = false) {
     return $('typeCustom').value.trim() || (isCustomEvent ? 'Wydarzenie własne' : 'Laboratorium');
   }
   return $('typeSelect').value;
-}
-
-function updateTypeSelectFields() {
-  const isCustomType = $('typeSelect').value === CUSTOM_TYPE_VALUE;
-  const customInput = $('typeCustom');
-  customInput.hidden = !isCustomType;
-  customInput.required = isCustomType;
-  if (isCustomType) {
-    customInput.focus();
-  }
 }
 
 function findDefaultNonHolidayDate(preferredDate) {
@@ -1490,20 +1176,14 @@ function updateSubjectSelectionFields() {
   $('teacherLabelText').textContent = isCustom ? 'Osoba / Prowadzący (opcjonalnie)' : 'Prowadzący (opcjonalnie)';
 
   if (!editingId) {
-    if (isCustom && $('typeSelect').value === 'Laboratorium') {
-      setSelectedEventType('Spotkanie', true);
-    } else if (!isCustom && $('typeSelect').value === 'Spotkanie') {
-      setSelectedEventType('Laboratorium', false);
-    }
-    if (isCustom && $('start').value === '08:00' && $('end').value === '09:30') {
-      $('end').value = '09:00';
-    }
+    if (isCustom && $('typeSelect').value === 'Laboratorium') setSelectedEventType('Spotkanie', true);
+    else if (!isCustom && $('typeSelect').value === 'Spotkanie') setSelectedEventType('Laboratorium', false);
+    if (isCustom && $('start').value === '08:00' && $('end').value === '09:30') $('end').value = '09:00';
   }
 }
 
 function openEventDialog(id, initialDate = null, initialStart = null) {
   if (busy) return;
-
   editingId = id || null;
   const event = state.plan.events.find((e) => e.id === id);
 
@@ -1513,15 +1193,11 @@ function openEventDialog(id, initialDate = null, initialStart = null) {
   const select = $('subject');
   select.replaceChildren();
   for (const subject of state.plan.subjects) {
-    const option = node('option', '', subject.name);
-    option.value = subject.id;
-    select.append(option);
+    const opt = node('option', '', subject.name);
+    opt.value = subject.id;
+    select.append(opt);
   }
-  const customOption = node(
-    'option',
-    '',
-    '★ Wydarzenie własne / poza przedmiotem (np. promotor, dentysta)',
-  );
+  const customOption = node('option', '', '★ Wydarzenie własne / poza przedmiotem (np. promotor, dentysta)');
   customOption.value = CUSTOM_SUBJECT_VALUE;
   select.append(customOption);
 
@@ -1535,8 +1211,7 @@ function openEventDialog(id, initialDate = null, initialStart = null) {
   $('until').required = false;
 
   const t = today();
-  const todayInWeek = t >= week && t <= addDays(week, 6);
-  const fallbackDate = findDefaultNonHolidayDate(todayInWeek ? t : week);
+  const fallbackDate = findDefaultNonHolidayDate(t >= week && t <= addDays(week, 6) ? t : week);
   const targetDate = event?.date || initialDate || fallbackDate;
   $('date').value = targetDate;
 
@@ -1544,36 +1219,20 @@ function openEventDialog(id, initialDate = null, initialStart = null) {
     for (const field of EVENT_FIELDS) $(field).value = event[field];
     setSelectedEventType(event.type, !event.subjectId);
     $('remote').checked = !!event.remote;
-    if (event.subjectId) {
-      select.value = event.subjectId;
-      $('customTitle').value = '';
-    } else {
-      select.value = CUSTOM_SUBJECT_VALUE;
-      $('customTitle').value = event.customTitle || '';
-    }
+    select.value = event.subjectId || CUSTOM_SUBJECT_VALUE;
+    $('customTitle').value = event.subjectId ? '' : event.customTitle || '';
     $('scope').value = 'one';
   } else {
     $('remote').checked = false;
     $('customTitle').value = '';
     const isTargetHoliday = !!holidayFor(targetDate, state.plan.academicYear);
-    const targetSpecial = (state.plan.academicYear?.specialDays || []).find(
-      (sd) => sd.date === targetDate,
-    );
-    const isTargetSession = targetSpecial?.type === 'session';
+    const isTargetSession = (state.plan.academicYear?.specialDays || []).some((sd) => sd.date === targetDate && sd.type === 'session');
     const defaultToCustom = !state.plan.subjects.length || isTargetHoliday;
-    if (defaultToCustom) {
-      select.value = CUSTOM_SUBJECT_VALUE;
-    }
-    const defaultType = defaultToCustom
-      ? 'Spotkanie'
-      : isTargetSession
-        ? 'Egzamin'
-        : 'Laboratorium';
-    setSelectedEventType(defaultType, defaultToCustom);
+    if (defaultToCustom) select.value = CUSTOM_SUBJECT_VALUE;
+    setSelectedEventType(defaultToCustom ? 'Spotkanie' : isTargetSession ? 'Egzamin' : 'Laboratorium', defaultToCustom);
     const startVal = initialStart || (defaultToCustom ? '12:00' : '08:00');
-    const defaultDurationMin = defaultToCustom ? 60 : 90;
     $('start').value = startVal;
-    $('end').value = fromMinutes(Math.min(23 * 60 + 55, toMinutes(startVal) + defaultDurationMin));
+    $('end').value = fromMinutes(Math.min(23 * 60 + 55, toMinutes(startVal) + (defaultToCustom ? 60 : 90)));
   }
 
   updateSubjectSelectionFields();
@@ -1592,11 +1251,7 @@ function updateRepeatFields() {
 function readEventForm() {
   const isCustom = $('subject').value === CUSTOM_SUBJECT_VALUE;
   const start = $('start').value.trim() || (isCustom ? '12:00' : '08:00');
-  const defaultDuration = isCustom ? 60 : 90;
-  const end =
-    $('end').value.trim() ||
-    fromMinutes(Math.min(23 * 60 + 55, toMinutes(start) + defaultDuration));
-
+  const end = $('end').value.trim() || fromMinutes(Math.min(23 * 60 + 55, toMinutes(start) + (isCustom ? 60 : 90)));
   const base = {
     subjectId: isCustom ? null : $('subject').value,
     type: getSelectedEventType(isCustom),
@@ -1608,33 +1263,21 @@ function readEventForm() {
     notes: $('notes').value.trim(),
     remote: $('remote').checked,
   };
-  if (isCustom) {
-    base.customTitle = $('customTitle').value.trim();
-  }
+  if (isCustom) base.customTitle = $('customTitle').value.trim();
   return base;
 }
 
-/**
- * Czy zajęcia `e` należą do wybranego zakresu edycji/usuwania:
- *  - 'one'    → tylko to jedno spotkanie,
- *  - 'future' → to i wszystkie kolejne spotkania z tej samej serii,
- *  - 'all'    → cała seria (wszystkie tygodnie oraz dni przeniesione).
- */
 function inScope(e, original, scope) {
   if (e.id === original.id) return true;
   if (scope === 'all') return e.seriesId === original.seriesId;
-  if (scope === 'future') return e.seriesId === original.seriesId && e.date >= original.date;
-  return false;
+  return scope === 'future' && e.seriesId === original.seriesId && e.date >= original.date;
 }
 
 function saveEvent(submitEvent) {
   submitEvent.preventDefault();
   try {
     const values = readEventForm();
-    if (values.end <= values.start) {
-      throw Error('Godzina zakończenia musi być późniejsza niż rozpoczęcia.');
-    }
-
+    if (values.end <= values.start) throw Error('Godzina zakończenia musi być późniejsza niż rozpoczęcia.');
     const applyAcademicYear = $('applyAcademicYear').checked;
     const isCustom = !values.subjectId;
 
@@ -1643,60 +1286,34 @@ function saveEvent(submitEvent) {
         const original = plan.events.find((e) => e.id === editingId);
         const scope = $('scope').value;
         const shiftDays = Math.round((Date.parse(values.date) - Date.parse(original.date)) / 86_400_000);
-
         if (!isCustom && shiftDays !== 0) {
           const targetHoliday = holidayFor(values.date, plan.academicYear);
           if (targetHoliday) {
             const reason = targetHoliday.label ? ` (${targetHoliday.label})` : '';
-            throw Error(
-              `${values.date} to dzień wolny${reason}. W weekendy i dni wolne można dodawać wyłącznie wydarzenia własne (poza przedmiotem).`,
-            );
+            throw Error(`${values.date} to dzień wolny${reason}. W weekendy i dni wolne można dodawać wyłącznie wydarzenia własne (poza przedmiotem).`);
           }
         }
-
         plan.events = plan.events.map((e) => {
           if (!inScope(e, original, scope)) return e;
           const nextDate = addDays(e.date, shiftDays);
-          // Jeśli przesuwamy serię zajęć przedmiotu i któryś z docelowych dni jest dniem wolnym, pomijamy go
-          if (!isCustom && shiftDays !== 0 && holidayFor(nextDate, plan.academicYear)) {
-            return null;
-          }
+          if (!isCustom && shiftDays !== 0 && holidayFor(nextDate, plan.academicYear)) return null;
           const updated = { ...e, ...values, date: nextDate };
-          if (values.subjectId) {
-            delete updated.customTitle;
-            delete updated.customColor;
-          }
+          if (values.subjectId) { delete updated.customTitle; delete updated.customColor; }
           return updated;
         }).filter(Boolean);
       } else {
-        const repeatMode = $('repeat').value;
-        // Blokada rozpoczęcia powtarzania lub pojedynczych zajęć przedmiotu w dniu wolnym lub w weekend
         if (!isCustom && applyAcademicYear) {
           const startHoliday = holidayFor(values.date, plan.academicYear);
           if (startHoliday) {
             const reason = startHoliday.label ? ` (${startHoliday.label})` : '';
-            throw Error(
-              `Wybrany dzień (${values.date}) jest ustawiony jako wolny${reason}. W weekendy i dni wolne można dodawać wyłącznie wydarzenia własne (poza przedmiotem).`,
-            );
+            throw Error(`Wybrany dzień (${values.date}) jest ustawiony jako wolny${reason}. W weekendy i dni wolne można dodawać wyłącznie wydarzenia własne (poza przedmiotem).`);
           }
         }
-
         const seriesId = uid();
-        const dates = datesFor(
-          values.date,
-          $('until').value,
-          repeatMode,
-          $('manual').value,
-          plan.academicYear,
-          applyAcademicYear,
-          isCustom,
-        );
-        for (const date of dates) {
-          plan.events.push({ ...values, date, id: uid(), seriesId });
-        }
+        const dates = datesFor(values.date, $('until').value, $('repeat').value, $('manual').value, plan.academicYear, applyAcademicYear, isCustom);
+        for (const date of dates) plan.events.push({ ...values, date, id: uid(), seriesId });
       }
     });
-
     $('eventDialog').close();
   } catch (err) {
     $('eventError').textContent = err.message;
@@ -1705,15 +1322,12 @@ function saveEvent(submitEvent) {
 
 function deleteEvent() {
   const scope = $('scope').value;
-  let confirmMsg = 'Czy na pewno usunąć tylko to jedno spotkanie z planu?';
-  if (scope === 'future') {
-    confirmMsg = 'Czy na pewno usunąć to i wszystkie kolejne spotkania tej serii?';
-  } else if (scope === 'all') {
-    confirmMsg = 'Czy na pewno usunąć CAŁĄ serię zajęć (ze wszystkich tygodni oraz przeniesionych dni)?';
-  }
-
-  if (!confirm(confirmMsg)) return;
-
+  const confirmMsgs = {
+    one: 'Czy na pewno usunąć tylko to jedno spotkanie z planu?',
+    future: 'Czy na pewno usunąć to i wszystkie kolejne spotkania tej serii?',
+    all: 'Czy na pewno usunąć CAŁĄ serię zajęć (ze wszystkich tygodni oraz przeniesionych dni)?',
+  };
+  if (!confirm(confirmMsgs[scope] || confirmMsgs.one)) return;
   try {
     mutate((plan) => {
       const original = plan.events.find((e) => e.id === editingId);
@@ -1725,12 +1339,11 @@ function deleteEvent() {
   }
 }
 
-// --- Masowe usuwanie serii i czyszczenie kalendarza --------------------------
+// --- Masowe usuwanie i czyszczenie planu -------------------------------------
 
 function renderSeriesList() {
   const container = $('seriesList');
   container.replaceChildren();
-
   if (!state.plan.events.length) {
     container.append(node('p', 'hint', 'Kalendarz nie zawiera obecnie żadnych zajęć.'));
     return;
@@ -1742,8 +1355,6 @@ function renderSeriesList() {
     groups.get(e.seriesId).push(e);
   }
 
-  const subjectMap = new Map(state.plan.subjects.map((s) => [s.id, s]));
-
   for (const [seriesId, events] of groups) {
     events.sort((a, b) => a.date.localeCompare(b.date));
     const first = events[0];
@@ -1754,31 +1365,15 @@ function renderSeriesList() {
     const info = node('div', 'seriesrow-info');
     info.append(
       node('div', 'seriesrow-title', `${subjectName} · ${first.type} (${first.start}–${first.end})`),
-      node(
-        'div',
-        'seriesrow-meta',
-        events.length > 1
-          ? `Spotkań: ${events.length} · Zakres: ${first.date} → ${last.date}`
-          : `Pojedyncze spotkanie: ${first.date}`,
-      ),
+      node('div', 'seriesrow-meta', events.length > 1 ? `Spotkań: ${events.length} · Zakres: ${first.date} → ${last.date}` : `Pojedyncze spotkanie: ${first.date}`),
     );
-
     const delBtn = node('button', 'danger', events.length > 1 ? `Usuń serię (${events.length})` : 'Usuń');
     delBtn.type = 'button';
     delBtn.onclick = () => {
-      if (
-        !confirm(
-          `Usunąć wszystkie spotkania z serii „${subjectName} (${first.type})” (${events.length} terminów, w tym przeniesione dni)?`,
-        )
-      ) {
-        return;
-      }
-      mutate((plan) => {
-        plan.events = plan.events.filter((e) => e.seriesId !== seriesId);
-      });
+      if (!confirm(`Usunąć wszystkie spotkania z serii „${subjectName} (${first.type})” (${events.length} terminów, w tym przeniesione dni)?`)) return;
+      mutate((plan) => { plan.events = plan.events.filter((e) => e.seriesId !== seriesId); });
       renderSeriesList();
     };
-
     row.append(info, delBtn);
     container.append(row);
   }
@@ -1799,9 +1394,7 @@ function runReconcile() {
       summary = { removed: res.removed, added: res.added };
     });
     renderSeriesList();
-    setStatus(
-      `Przeliczono serie wg struktury roku: usunięto ${summary.removed} z dni wolnych/zamienionych, dodano ${summary.added} w dniach z zamianą planu.`,
-    );
+    setStatus(`Przeliczono serie wg struktury roku: usunięto ${summary.removed} z dni wolnych/zamienionych, dodano ${summary.added} w dniach z zamianą planu.`);
   } catch (err) {
     setStatus(err.message);
   }
@@ -1812,171 +1405,81 @@ function clearAllEvents() {
     setStatus('Brak zajęć do usunięcia.');
     return;
   }
-  if (
-    !confirm(
-      `Czy na pewno usunąć WSZYSTKIE zajęcia (${state.plan.events.length} spotkań) z planu zajęć? Przedmioty oraz struktura roku zostaną zachowane.`,
-    )
-  ) {
-    return;
-  }
-
-  mutate((plan) => {
-    plan.events = [];
-  });
+  if (!confirm(`Czy na pewno usunąć WSZYSTKIE zajęcia (${state.plan.events.length} spotkań) z planu zajęć? Przedmioty oraz struktura roku zostaną zachowane.`)) return;
+  mutate((plan) => { plan.events = []; });
   renderSeriesList();
   $('bulkDialog').close();
   setStatus('Usunięto wszystkie zajęcia. Kliknij „Zapisz w chmurze”, jeśli chcesz nadpisać również plan w chmurze.');
 }
 
 function clearEntireCalendar() {
-  if (
-    !confirm(
-      'Czy na pewno wyczyścić CAŁY plan zajęć do zera (wszystkie zajęcia, przedmioty oraz strukturę roku)? Tej operacji nie można cofnąć lokalnie bez kopii JSON.',
-    )
-  ) {
-    return;
-  }
-
-  mutate((plan) => {
-    Object.assign(plan, emptyPlan());
-  });
+  if (!confirm('Czy na pewno wyczyścić CAŁY plan zajęć do zera (wszystkie zajęcia, przedmioty oraz strukturę roku)? Tej operacji nie można cofnąć lokalnie bez kopii JSON.')) return;
+  mutate((plan) => { Object.assign(plan, emptyPlan()); });
   renderSeriesList();
   $('bulkDialog').close();
   setStatus('Plan zajęć został całkowicie wyczyszczony do zera. Kliknij „Zapisz w chmurze”, aby nadpisać dane w chmurze.');
 }
 
-// --- Struktura roku akademickiego ------------------------------------------
+// --- Struktura roku akademickiego --------------------------------------------
 
 function groupSpecialDays(specialDays) {
   const sorted = [...specialDays].sort((a, b) => a.date.localeCompare(b.date));
   const groups = [];
-
   for (let i = 0; i < sorted.length; i++) {
-    const current = sorted[i];
-
-    if (current.type === 'holiday' || current.type === 'session') {
+    const cur = sorted[i];
+    if (cur.type === 'holiday' || cur.type === 'session') {
       let j = i;
-      while (
-        j + 1 < sorted.length &&
-        sorted[j + 1].type === current.type &&
-        (sorted[j + 1].label || '') === (current.label || '') &&
-        sorted[j + 1].date === addDays(sorted[j].date, 1)
-      ) {
-        j++;
-      }
-
+      while (j + 1 < sorted.length && sorted[j + 1].type === cur.type && (sorted[j + 1].label || '') === (cur.label || '') && sorted[j + 1].date === addDays(sorted[j].date, 1)) j++;
       if (j > i) {
-        groups.push({
-          type: current.type,
-          label: current.label,
-          startDate: current.date,
-          endDate: sorted[j].date,
-          count: j - i + 1,
-          dates: sorted.slice(i, j + 1).map((x) => x.date),
-        });
+        groups.push({ type: cur.type, label: cur.label, startDate: cur.date, endDate: sorted[j].date, count: j - i + 1, dates: sorted.slice(i, j + 1).map((x) => x.date) });
         i = j;
         continue;
       }
     }
-
-    groups.push({
-      type: current.type,
-      label: current.label,
-      targetDay: current.targetDay,
-      start: current.start,
-      end: current.end,
-      startDate: current.date,
-      endDate: current.date,
-      count: 1,
-      dates: [current.date],
-    });
+    groups.push({ ...cur, startDate: cur.date, endDate: cur.date, count: 1, dates: [cur.date] });
   }
-
   return groups;
 }
 
 function renderSpecialDaysList() {
   const container = $('specialDayList');
   container.replaceChildren();
-
   const specialDays = state.plan.academicYear?.specialDays || [];
-
   if (!specialDays.length) {
-    container.append(
-      node('p', 'hint', 'Brak zdefiniowanych dni wolnych, sesji, przerw i godzin rektorskich. Dodaj je poniżej.'),
-    );
+    container.append(node('p', 'hint', 'Brak zdefiniowanych dni wolnych, sesji, przerw i godzin rektorskich. Dodaj je poniżej.'));
     return;
   }
 
-  const groups = groupSpecialDays(specialDays);
+  for (const g of groupSpecialDays(specialDays)) {
+    const isRange = g.count > 1;
+    const badgeText =
+      g.type === 'holiday' ? (isRange ? `Przerwa (${g.count} dni)` : 'Wolne')
+        : g.type === 'session' ? (isRange ? `Sesja (${g.count} dni)` : 'Sesja')
+          : g.type === 'rector' ? (g.start && g.end ? `Rektorskie ${g.start}–${g.end}` : 'Dzień rektorski')
+            : 'Zamiana';
 
-  for (const group of groups) {
+    let descText = g.label || (g.type === 'holiday' ? (isRange ? 'Przerwa świąteczna / wolna' : 'Dzień wolny')
+      : g.type === 'session' ? (isRange ? 'Sesja egzaminacyjna / poprawkowa (brak zwykłych zajęć)' : 'Dzień sesji egzaminacyjnej') : '');
+    if (g.type === 'swap') {
+      const swapDesc = `Zajęcia według planu z ${DAY_KEY_NAMES[g.targetDay] || g.targetDay}`;
+      descText = descText ? `${swapDesc} (${descText})` : swapDesc;
+    } else if (g.type === 'rector') {
+      const rectorDesc = g.start && g.end ? `Godziny rektorskie ${g.start} – ${g.end} (nakładka na plan)` : 'Dzień rektorski — cały dzień (nakładka na plan)';
+      descText = g.label ? `${rectorDesc} · ${g.label}` : rectorDesc;
+    }
+
     const row = node('div', 'specialdayrow');
     const info = node('div', 'specialdayrow-info');
-
     const dateLine = node('div', 'specialdayrow-date');
-    const isRange = group.count > 1;
-    let badgeText = 'Zamiana';
-    if (group.type === 'holiday') {
-      badgeText = isRange ? `Przerwa (${group.count} dni)` : 'Wolne';
-    } else if (group.type === 'session') {
-      badgeText = isRange ? `Sesja (${group.count} dni)` : 'Sesja';
-    } else if (group.type === 'rector') {
-      badgeText = group.start && group.end ? `Rektorskie ${group.start}–${group.end}` : 'Dzień rektorski';
-    }
-    const badge = node('span', `badge ${group.type}`, badgeText);
+    dateLine.append(node('span', '', isRange ? `${g.startDate} → ${g.endDate}` : g.startDate), node('span', `badge ${g.type}`, badgeText));
+    info.append(dateLine, node('div', 'specialdayrow-desc', descText));
 
-    const dateRangeStr = isRange ? `${group.startDate} → ${group.endDate}` : group.startDate;
-    dateLine.append(node('span', '', dateRangeStr), badge);
-
-    let descText =
-      group.label ||
-      (group.type === 'holiday'
-        ? isRange
-          ? 'Przerwa świąteczna / wolna'
-          : 'Dzień wolny'
-        : group.type === 'session'
-          ? isRange
-            ? 'Sesja egzaminacyjna / poprawkowa (brak zwykłych zajęć)'
-            : 'Dzień sesji egzaminacyjnej'
-          : '');
-    if (group.type === 'swap') {
-      const targetName = DAY_KEY_NAMES[group.targetDay] || group.targetDay;
-      const swapDesc = `Zajęcia według planu z ${targetName}`;
-      descText = descText ? `${swapDesc} (${descText})` : swapDesc;
-    } else if (group.type === 'rector') {
-      const rectorDesc =
-        group.start && group.end
-          ? `Godziny rektorskie ${group.start} – ${group.end} (nakładka na plan)`
-          : 'Dzień rektorski — cały dzień (nakładka na plan)';
-      descText = group.label ? `${rectorDesc} · ${group.label}` : rectorDesc;
-    }
-    const desc = node('div', 'specialdayrow-desc', descText);
-
-    info.append(dateLine, desc);
-
-    const deleteBtn = node('button', 'danger', 'Usuń');
-    deleteBtn.type = 'button';
-    deleteBtn.onclick = () => deleteSpecialDays(group.dates);
-
-    row.append(info, deleteBtn);
+    const delBtn = node('button', 'danger', 'Usuń');
+    delBtn.type = 'button';
+    delBtn.onclick = () => deleteSpecialDays(g.dates);
+    row.append(info, delBtn);
     container.append(row);
   }
-}
-
-function openAcademicYearDialog() {
-  if (!editMode) return;
-  renderSpecialDaysList();
-  $('academicYearError').textContent = '';
-  $('specialDayDate').value = today();
-  $('specialDayDateEnd').value = addDays(today(), 7);
-  $('specialDayLabel').value = '';
-  $('specialDayType').value = 'holiday_range';
-  $('rectorFullDay').checked = false;
-  $('rectorStart').value = '10:00';
-  $('rectorEnd').value = '14:00';
-  updateSpecialDayTypeFields();
-  showDialogModal($('academicYearDialog'));
 }
 
 function updateSpecialDayTypeFields() {
@@ -1993,13 +1496,22 @@ function updateSpecialDayTypeFields() {
   $('rectorTimePair').hidden = !isRector || fullDayRector;
   $('rectorStart').required = isRector && !fullDayRector;
   $('rectorEnd').required = isRector && !fullDayRector;
+  $('specialDayDateLabel').childNodes[0].textContent = isRange ? 'Data od: ' : 'Data: ';
+}
 
-  const dateLabel = $('specialDayDateLabel');
-  if (isRange) {
-    dateLabel.childNodes[0].textContent = 'Data od: ';
-  } else {
-    dateLabel.childNodes[0].textContent = 'Data: ';
-  }
+function openAcademicYearDialog() {
+  if (!editMode) return;
+  renderSpecialDaysList();
+  $('academicYearError').textContent = '';
+  $('specialDayDate').value = today();
+  $('specialDayDateEnd').value = addDays(today(), 7);
+  $('specialDayLabel').value = '';
+  $('specialDayType').value = 'holiday_range';
+  $('rectorFullDay').checked = false;
+  $('rectorStart').value = '10:00';
+  $('rectorEnd').value = '14:00';
+  updateSpecialDayTypeFields();
+  showDialogModal($('academicYearDialog'));
 }
 
 function deleteSpecialDays(datesToDelete) {
@@ -2027,22 +1539,15 @@ function saveSpecialDay(event) {
     const rectorStart = $('rectorStart').value;
     const rectorEnd = $('rectorEnd').value;
 
-    if (type === 'rector' && !rectorFullDay) {
-      if (!rectorStart || !rectorEnd || rectorEnd <= rectorStart) {
-        throw Error('Godzina zakończenia godzin rektorskich musi być późniejsza niż godzina rozpoczęcia.');
-      }
+    if (type === 'rector' && !rectorFullDay && (!rectorStart || !rectorEnd || rectorEnd <= rectorStart)) {
+      throw Error('Godzina zakończenia godzin rektorskich musi być późniejsza niż godzina rozpoczęcia.');
     }
 
     const datesToAdd = [];
-
     if (type === 'holiday_range' || type === 'session_range') {
-      if (!endDate || endDate < startDate) {
-        throw Error('Data końcowa musi być późniejsza lub równa dacie początkowej.');
-      }
+      if (!endDate || endDate < startDate) throw Error('Data końcowa musi być późniejsza lub równa dacie początkowej.');
       for (let cur = startDate; cur <= endDate; cur = addDays(cur, 1)) {
-        if (datesToAdd.length >= 366) {
-          throw Error('Zakres nie może trwać dłużej niż 366 dni.');
-        }
+        if (datesToAdd.length >= 366) throw Error('Zakres nie może trwać dłużej niż 366 dni.');
         datesToAdd.push(cur);
       }
     } else {
@@ -2051,29 +1556,16 @@ function saveSpecialDay(event) {
 
     mutate((plan) => {
       if (!plan.academicYear) plan.academicYear = { specialDays: [] };
-
-      // Sprawdź, czy któryś dzień nie jest już zajęty
-      const existingMap = new Map(plan.academicYear.specialDays.map((sd) => [sd.date, sd]));
+      const existing = new Set(plan.academicYear.specialDays.map((sd) => sd.date));
       for (const d of datesToAdd) {
-        if (existingMap.has(d)) {
-          throw Error(`Dla dnia ${d} już istnieje wpis w strukturze roku. Najpierw go usuń.`);
-        }
+        if (existing.has(d)) throw Error(`Dla dnia ${d} już istnieje wpis w strukturze roku. Najpierw go usuń.`);
       }
 
-      const normalizedType =
-        type === 'session' || type === 'session_range'
-          ? 'session'
-          : type === 'swap'
-            ? 'swap'
-            : 'holiday';
-
+      const normalizedType = type === 'session' || type === 'session_range' ? 'session' : type === 'swap' ? 'swap' : 'holiday';
       for (const d of datesToAdd) {
         if (type === 'rector') {
           const item = { date: d, type: 'rector', label };
-          if (!rectorFullDay) {
-            item.start = rectorStart;
-            item.end = rectorEnd;
-          }
+          if (!rectorFullDay) { item.start = rectorStart; item.end = rectorEnd; }
           plan.academicYear.specialDays.push(item);
         } else {
           const item = { date: d, type: normalizedType, label };
@@ -2081,10 +1573,7 @@ function saveSpecialDay(event) {
           plan.academicYear.specialDays.push(item);
         }
       }
-
-      // Automatycznie dopasuj istniejące serie cykliczne do zaktualizowanej struktury roku
-      const reconciled = reconcileWithAcademicYear(plan, uid);
-      plan.events = reconciled.events;
+      plan.events = reconcileWithAcademicYear(plan, uid).events;
     });
 
     $('specialDayLabel').value = '';
@@ -2095,19 +1584,14 @@ function saveSpecialDay(event) {
   }
 }
 
-// --- Tablica Kanban (osobny plik kanban.json + chmura /api/kanban) -----------
+// --- Tablica Kanban ----------------------------------------------------------
 
-const PRIORITY_LABELS = {
-  high: 'Wysoki',
-  medium: 'Średni',
-  low: 'Niski',
-};
-
-const PRIORITY_WEIGHT = {
-  high: 0,
-  medium: 1,
-  low: 2,
-};
+function getKnownSubjectNames() {
+  const names = new Set();
+  for (const s of state.plan.subjects) if (s.name?.trim()) names.add(s.name.trim());
+  for (const c of kanbanState.kanban.cards) if (c.subjectName?.trim()) names.add(c.subjectName.trim());
+  return [...names].sort((a, b) => a.localeCompare(b, 'pl'));
+}
 
 function renderKanbanBadge() {
   const badge = $('kanbanCountBadge');
@@ -2121,60 +1605,26 @@ function renderKanbanBadge() {
 
 function getDueDateStatus(dueDate, isDoneCol) {
   if (!dueDate) return null;
-  const t = today();
-  const diffDays = Math.round((Date.parse(dueDate + 'T12:00:00Z') - Date.parse(t + 'T12:00:00Z')) / 86_400_000);
-  if (isDoneCol) {
-    return { label: formatDate(dueDate), variant: 'done', icon: 'ph-calendar-check' };
-  }
-  if (diffDays < 0) {
-    return {
-      label: `Po terminie (${formatDate(dueDate)})`,
-      variant: 'overdue',
-      icon: 'ph-warning-circle',
-    };
-  }
-  if (diffDays === 0) {
-    return { label: 'Dzisiaj!', variant: 'due-soon', icon: 'ph-alarm' };
-  }
-  if (diffDays === 1) {
-    return { label: 'Jutro', variant: 'due-soon', icon: 'ph-clock-countdown' };
-  }
-  if (diffDays <= 3) {
-    return { label: `Za ${diffDays} dni (${formatDate(dueDate)})`, variant: 'due-soon', icon: 'ph-clock' };
-  }
+  const diffDays = Math.round((Date.parse(dueDate + 'T12:00:00Z') - Date.parse(today() + 'T12:00:00Z')) / 86_400_000);
+  if (isDoneCol) return { label: formatDate(dueDate), variant: 'done', icon: 'ph-calendar-check' };
+  if (diffDays < 0) return { label: `Po terminie (${formatDate(dueDate)})`, variant: 'overdue', icon: 'ph-warning-circle' };
+  if (diffDays === 0) return { label: 'Dzisiaj!', variant: 'due-soon', icon: 'ph-alarm' };
+  if (diffDays === 1) return { label: 'Jutro', variant: 'due-soon', icon: 'ph-clock-countdown' };
+  if (diffDays <= 3) return { label: `Za ${diffDays} dni (${formatDate(dueDate)})`, variant: 'due-soon', icon: 'ph-clock' };
   return { label: formatDate(dueDate), variant: 'normal', icon: 'ph-calendar-blank' };
 }
 
 function updateKanbanSubjectFilterOptions() {
   const select = $('kanbanFilterSubject');
   const prevValue = select.value;
-
-  const subjectSet = new Set();
-  for (const s of state.plan.subjects) {
-    if (s.name?.trim()) subjectSet.add(s.name.trim());
-  }
-  for (const c of kanbanState.kanban.cards) {
-    if (c.subjectName?.trim()) subjectSet.add(c.subjectName.trim());
-  }
-
   select.replaceChildren();
-  const allOpt = node('option', '', 'Wszystkie przedmioty');
-  allOpt.value = '';
-  select.append(allOpt);
-
-  const noneOpt = node('option', '', 'Ogólne (bez przedmiotu)');
-  noneOpt.value = '__none__';
-  select.append(noneOpt);
-
-  for (const name of [...subjectSet].sort((a, b) => a.localeCompare(b, 'pl'))) {
-    const opt = node('option', '', name);
-    opt.value = name;
+  const options = [['', 'Wszystkie przedmioty'], ['__none__', 'Ogólne (bez przedmiotu)'], ...getKnownSubjectNames().map((n) => [n, n])];
+  for (const [val, label] of options) {
+    const opt = node('option', '', label);
+    opt.value = val;
     select.append(opt);
   }
-
-  if (Array.from(select.options).some((o) => o.value === prevValue)) {
-    select.value = prevValue;
-  }
+  if (Array.from(select.options).some((o) => o.value === prevValue)) select.value = prevValue;
 }
 
 function getFilteredKanbanCards() {
@@ -2187,16 +1637,9 @@ function getFilteredKanbanCards() {
     if (subjFilter && subjFilter !== '__none__' && (card.subjectName || '') !== subjFilter) return false;
     if (prioFilter && card.priority !== prioFilter) return false;
     if (query) {
-      const haystack = [
-        card.title,
-        card.description || '',
-        card.subjectName || '',
-        card.category || '',
-        ...(card.checklist || []).map((i) => i.text),
-      ]
-        .join(' ')
-        .toLocaleLowerCase('pl');
-      if (!haystack.includes(query)) return false;
+      const hay = [card.title, card.description || '', card.subjectName || '', card.category || '', ...(card.checklist || []).map((i) => i.text)]
+        .join(' ').toLocaleLowerCase('pl');
+      if (!hay.includes(query)) return false;
     }
     return true;
   });
@@ -2205,23 +1648,14 @@ function getFilteredKanbanCards() {
 function renderMobileKanbanTabs(filteredCards) {
   const nav = $('mobileKanbanTabs');
   nav.replaceChildren();
-
   const cols = kanbanState.kanban.columns;
-  if (selectedKanbanColIndex >= cols.length) {
-    selectedKanbanColIndex = Math.max(0, cols.length - 1);
-  }
+  if (selectedKanbanColIndex >= cols.length) selectedKanbanColIndex = Math.max(0, cols.length - 1);
 
   cols.forEach((col, idx) => {
     const count = filteredCards.filter((c) => c.columnId === col.id).length;
-    let cls = 'mobile-day-tab';
-    if (idx === selectedKanbanColIndex) cls += ' active';
-
-    const btn = node('button', cls);
+    const btn = node('button', `mobile-day-tab${idx === selectedKanbanColIndex ? ' active' : ''}`);
     btn.type = 'button';
-    btn.append(
-      node('span', 'tab-code', col.title),
-      node('span', 'tab-num', `${count}`),
-    );
+    btn.append(node('span', 'tab-code', col.title), node('span', 'tab-num', `${count}`));
     btn.onclick = () => {
       if (selectedKanbanColIndex !== idx) {
         kanbanMobileSlideDir = idx > selectedKanbanColIndex ? 'slide-next' : 'slide-prev';
@@ -2238,28 +1672,33 @@ function moveKanbanCardToColumn(cardId, targetColumnId, targetIndex = null) {
     const card = kanban.cards.find((c) => c.id === cardId);
     if (!card) return;
     card.columnId = targetColumnId;
-
-    const colCards = kanban.cards
-      .filter((c) => c.columnId === targetColumnId && c.id !== cardId)
-      .sort((a, b) => a.order - b.order);
-
-    const insertAt =
-      targetIndex === null
-        ? colCards.length
-        : Math.max(0, Math.min(colCards.length, targetIndex));
+    const colCards = kanban.cards.filter((c) => c.columnId === targetColumnId && c.id !== cardId).sort((a, b) => a.order - b.order);
+    const insertAt = targetIndex === null ? colCards.length : Math.max(0, Math.min(colCards.length, targetIndex));
     colCards.splice(insertAt, 0, card);
-    colCards.forEach((c, idx) => {
-      c.order = idx;
-    });
+    colCards.forEach((c, idx) => { c.order = idx; });
   });
 }
 
 function toggleKanbanChecklistItem(cardId, itemId) {
   mutateKanban((kanban) => {
-    const card = kanban.cards.find((c) => c.id === cardId);
-    const item = card?.checklist?.find((i) => i.id === itemId);
+    const item = kanban.cards.find((c) => c.id === cardId)?.checklist?.find((i) => i.id === itemId);
     if (item) item.done = !item.done;
   });
+}
+
+function buildChecklistItems(checklist, onToggle) {
+  const frag = document.createDocumentFragment();
+  for (const item of checklist) {
+    const row = node('label', `kanban-card-checkitem${item.done ? ' done' : ''}`);
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = item.done;
+    cb.disabled = !editMode;
+    if (editMode) cb.onchange = (e) => { e.stopPropagation(); onToggle(item); };
+    row.append(cb, node('span', '', item.text));
+    frag.append(row);
+  }
+  return frag;
 }
 
 function openKanbanDetailsDialog(cardId) {
@@ -2267,83 +1706,53 @@ function openKanbanDetailsDialog(cardId) {
   if (!card) return;
   detailsKanbanCardId = card.id;
 
-  const col = kanbanState.kanban.columns.find((c) => c.id === card.columnId);
   const cols = kanbanState.kanban.columns;
+  const col = cols.find((c) => c.id === card.columnId);
   const isDoneCol = cols.length > 1 && cols[cols.length - 1]?.id === card.columnId;
 
   $('kanbanDetailsTitle').textContent = card.title;
   $('kanbanDetailsColumn').textContent = col ? col.title : 'Zadanie';
   $('kanbanDetailsPriority').textContent = `Priorytet: ${PRIORITY_LABELS[card.priority] || 'Średni'}`;
 
-  if (card.category) {
-    const typeVisual = getEventTypeVisual(card.category, false);
-    $('kanbanDetailsCategory').hidden = false;
-    $('kanbanDetailsCategory').innerHTML = `<i class="ph ${typeVisual.icon}"></i> `;
-    $('kanbanDetailsCategory').append(document.createTextNode(card.category));
-  } else {
-    $('kanbanDetailsCategory').hidden = true;
-  }
-
-  if (card.subjectName) {
-    $('kanbanDetailsSubject').hidden = false;
-    $('kanbanDetailsSubject').innerHTML = '<i class="ph ph-book-bookmark"></i> ';
-    $('kanbanDetailsSubject').append(document.createTextNode(card.subjectName));
-  } else {
-    $('kanbanDetailsSubject').hidden = true;
-  }
-
+  const setBadge = (el, show, icon, text) => {
+    el.hidden = !show;
+    if (show) {
+      el.innerHTML = `<i class="ph ${icon}"></i> `;
+      el.append(document.createTextNode(text));
+    }
+  };
+  setBadge($('kanbanDetailsCategory'), !!card.category, getEventTypeVisual(card.category, false).icon, card.category || '');
+  setBadge($('kanbanDetailsSubject'), !!card.subjectName, 'ph-book-bookmark', card.subjectName || '');
   const dueInfo = getDueDateStatus(card.dueDate, isDoneCol);
-  if (dueInfo) {
-    $('kanbanDetailsDue').hidden = false;
-    $('kanbanDetailsDue').innerHTML = `<i class="ph ${dueInfo.icon}"></i> `;
-    $('kanbanDetailsDue').append(document.createTextNode(`Termin: ${dueInfo.label}`));
-  } else {
-    $('kanbanDetailsDue').hidden = true;
-  }
+  setBadge($('kanbanDetailsDue'), !!dueInfo, dueInfo?.icon || '', dueInfo ? `Termin: ${dueInfo.label}` : '');
 
-  const hasDesc = Boolean(card.description?.trim());
-  $('kanbanDetailsDescSection').hidden = !hasDesc;
+  $('kanbanDetailsDescSection').hidden = !card.description?.trim();
   renderRichTextWithLinks($('kanbanDetailsDesc'), card.description || '');
-  $('copyKanbanDescBtn').onclick = () =>
-    copyTextWithFeedback(card.description || '', $('copyKanbanDescBtn'), 'Kopiuj notatkę');
+  $('copyKanbanDescBtn').onclick = () => copyTextWithFeedback(card.description || '', $('copyKanbanDescBtn'), 'Kopiuj notatkę');
 
-  const hasCheck = Boolean(card.checklist && card.checklist.length > 0);
+  const hasCheck = Boolean(card.checklist?.length);
   $('kanbanDetailsChecklistSection').hidden = !hasCheck;
   const checkContainer = $('kanbanDetailsChecklist');
   checkContainer.replaceChildren();
   if (hasCheck) {
     const doneCount = card.checklist.filter((i) => i.done).length;
     $('kanbanDetailsChecklistHead').textContent = `Lista podzadań (${doneCount}/${card.checklist.length})`;
-    for (const item of card.checklist) {
-      const row = node('label', `kanban-card-checkitem${item.done ? ' done' : ''}`);
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = item.done;
-      cb.disabled = !editMode;
-      cb.onchange = () => {
-        if (!editMode) return;
-        toggleKanbanChecklistItem(card.id, item.id);
-        openKanbanDetailsDialog(card.id);
-      };
-      row.append(cb, node('span', '', item.text));
-      checkContainer.append(row);
-    }
+    checkContainer.append(buildChecklistItems(card.checklist, (item) => {
+      toggleKanbanChecklistItem(card.id, item.id);
+      openKanbanDetailsDialog(card.id);
+    }));
   }
 
   showDialogModal($('kanbanDetailsDialog'));
 }
 
 function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
-  const el = node(
-    'article',
-    `kanban-card priority-${card.priority}${isDoneCol ? ' is-done' : ''}${editMode ? ' editable' : ''}`,
-  );
+  const el = node('article', `kanban-card priority-${card.priority}${isDoneCol ? ' is-done' : ''}${editMode ? ' editable' : ''}`);
   el.draggable = editMode;
   el.dataset.cardId = card.id;
 
   if (editMode) {
     el.addEventListener('dragstart', (e) => {
-      // Jeśli użytkownik zaznacza tekst w opisie/notatce, nie uruchamiamy przeciągania karty
       if (e.target?.closest?.('.kanban-card-desc, .rich-link-chip, .kanban-card-checklist')) {
         e.preventDefault();
         return;
@@ -2356,23 +1765,16 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     el.addEventListener('dragend', () => {
       draggedKanbanCardId = null;
       el.classList.remove('dragging');
-      for (const colEl of document.querySelectorAll('.kanban-col.drag-over')) {
-        colEl.classList.remove('drag-over');
-      }
+      for (const colEl of document.querySelectorAll('.kanban-col.drag-over')) colEl.classList.remove('drag-over');
     });
   } else {
     el.onclick = (e) => {
-      // Jeśli użytkownik właśnie zaznaczył tekst myszką (np. żeby skopiować fragment notatki), nie otwieramy okna
-      const selection = window.getSelection?.()?.toString().trim();
-      if (selection) return;
-      if (e.target?.closest?.('a, button, input, label')) return;
+      if (window.getSelection?.()?.toString().trim() || e.target?.closest?.('a, button, input, label')) return;
       openKanbanDetailsDialog(card.id);
     };
   }
 
-  // 1. Pasek plakietek na górze karty (Uchwyt przeciągania w trybie edycji, Priorytet, Kategoria, Przedmiot, Termin)
   const badgesRow = node('div', 'kanban-card-badges');
-
   if (editMode) {
     const dragHandle = node('span', 'kanban-drag-handle');
     dragHandle.title = 'Chwyć tutaj, aby przeciągnąć kartę';
@@ -2380,105 +1782,51 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     badgesRow.append(dragHandle);
   }
 
-  const prioBadge = node('span', `kanban-prio-badge priority-${card.priority}`);
-  const prioIcon =
-    card.priority === 'high'
-      ? 'ph-fire'
-      : card.priority === 'medium'
-        ? 'ph-flag'
-        : 'ph-arrow-down-right';
-  prioBadge.innerHTML = `<i class="ph ${prioIcon}"></i>`;
-  prioBadge.append(node('span', '', PRIORITY_LABELS[card.priority] || 'Średni'));
-  badgesRow.append(prioBadge);
+  const prioIcon = card.priority === 'high' ? 'ph-fire' : card.priority === 'medium' ? 'ph-flag' : 'ph-arrow-down-right';
+  badgesRow.append(iconTag(`kanban-prio-badge priority-${card.priority}`, prioIcon, PRIORITY_LABELS[card.priority] || 'Średni'));
 
   if (card.category) {
-    const typeVisual = getEventTypeVisual(card.category, false);
-    const catTag = node('span', `type-tag ${typeVisual.variant}`);
-    catTag.innerHTML = `<i class="ph ${typeVisual.icon}"></i>`;
-    catTag.append(node('span', '', card.category));
-    badgesRow.append(catTag);
+    const tv = getEventTypeVisual(card.category, false);
+    badgesRow.append(iconTag(`type-tag ${tv.variant}`, tv.icon, card.category));
   }
-
-  if (card.subjectName) {
-    const subjBadge = node('span', 'kanban-subject-badge');
-    subjBadge.innerHTML = '<i class="ph ph-book-bookmark"></i>';
-    subjBadge.append(node('span', '', card.subjectName));
-    badgesRow.append(subjBadge);
-  }
-
+  if (card.subjectName) badgesRow.append(iconTag('kanban-subject-badge', 'ph-book-bookmark', card.subjectName));
   const dueInfo = getDueDateStatus(card.dueDate, isDoneCol);
-  if (dueInfo) {
-    const dueBadge = node('span', `kanban-due-badge ${dueInfo.variant}`);
-    dueBadge.innerHTML = `<i class="ph ${dueInfo.icon}"></i>`;
-    dueBadge.append(node('span', '', dueInfo.label));
-    badgesRow.append(dueBadge);
-  }
+  if (dueInfo) badgesRow.append(iconTag(`kanban-due-badge ${dueInfo.variant}`, dueInfo.icon, dueInfo.label));
 
-  el.append(badgesRow);
-
-  // 2. Tytuł zadania (w trybie edycji otwiera edycję, w trybie przeglądania szczegóły)
   const titleBtn = node('button', 'kanban-card-title-btn', card.title);
   titleBtn.type = 'button';
   titleBtn.onclick = (e) => {
     e.stopPropagation();
-    if (editMode) {
-      openKanbanCardDialog(card.id);
-    } else {
-      openKanbanDetailsDialog(card.id);
-    }
+    if (editMode) openKanbanCardDialog(card.id);
+    else openKanbanDetailsDialog(card.id);
   };
-  el.append(titleBtn);
+  el.append(badgesRow, titleBtn);
 
-  // 3. Opis / notatka (kompaktowy podgląd do 2 linii + ikony podglądu i kopiowania obok)
   if (card.description?.trim()) {
     const descWrap = node('div', 'kanban-card-desc-wrap');
     const descEl = node('div', 'kanban-card-desc');
     renderRichTextWithLinks(descEl, card.description);
 
-    // Wyłączamy draggable na karcie, gdy użytkownik operuje kursorem wewnątrz pola notatki,
-    // dzięki czemu można swobodnie zaznaczyć myszką dowolny fragment tekstu lub linku!
-    descWrap.addEventListener('mouseenter', () => {
-      if (editMode) el.draggable = false;
-    });
-    descWrap.addEventListener('mouseleave', () => {
-      if (editMode) el.draggable = true;
-    });
-    descWrap.addEventListener(
-      'touchstart',
-      () => {
-        if (editMode) el.draggable = false;
-      },
-      { passive: true },
-    );
+    // Wyłączamy draggable nad opisem, aby można było swobodnie zaznaczać tekst/linki
+    descWrap.addEventListener('mouseenter', () => { if (editMode) el.draggable = false; });
+    descWrap.addEventListener('mouseleave', () => { if (editMode) el.draggable = true; });
+    descWrap.addEventListener('touchstart', () => { if (editMode) el.draggable = false; }, { passive: true });
 
     const previewActions = node('div', 'kanban-desc-actions');
-    const viewNoteBtn = node('button', 'kanban-note-action-btn');
-    viewNoteBtn.type = 'button';
-    viewNoteBtn.title = 'Pełny podgląd notatki';
-    viewNoteBtn.setAttribute('aria-label', 'Pełny podgląd notatki');
-    viewNoteBtn.innerHTML = '<i class="ph ph-eye"></i>';
-    viewNoteBtn.onclick = (e) => {
+    const viewBtn = iconBtn('kanban-note-action-btn', 'ph-eye', 'Pełny podgląd notatki', (e) => {
       e.stopPropagation();
       openKanbanDetailsDialog(card.id);
-    };
-
-    const copyNoteBtn = node('button', 'kanban-note-action-btn');
-    copyNoteBtn.type = 'button';
-    copyNoteBtn.title = 'Kopiuj notatkę';
-    copyNoteBtn.setAttribute('aria-label', 'Kopiuj notatkę');
-    copyNoteBtn.innerHTML = '<i class="ph ph-copy"></i>';
-    copyNoteBtn.onclick = (e) => {
+    });
+    const copyBtn = iconBtn('kanban-note-action-btn', 'ph-copy', 'Kopiuj notatkę', (e) => {
       e.stopPropagation();
-      copyTextWithFeedback(card.description, copyNoteBtn);
-    };
-
-    previewActions.append(viewNoteBtn, copyNoteBtn);
+      copyTextWithFeedback(card.description, copyBtn);
+    });
+    previewActions.append(viewBtn, copyBtn);
     descWrap.append(descEl, previewActions);
     el.append(descWrap);
   }
 
-  // 4. Checklista podzadań na karcie (kompaktowy pasek postępu + lista podzadań)
-  if (card.checklist && card.checklist.length > 0) {
+  if (card.checklist?.length) {
     const doneCount = card.checklist.filter((i) => i.done).length;
     const totalCount = card.checklist.length;
     const pct = Math.round((doneCount / totalCount) * 100);
@@ -2492,74 +1840,35 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     const progressFill = node('div', 'kanban-check-fill');
     progressFill.style.width = `${pct}%`;
     progressBar.append(progressFill);
-
-    const pctLabel = node('span', 'kanban-check-pct', `${pct}%`);
-    progressHead.append(checkLabel, progressBar, pctLabel);
+    progressHead.append(checkLabel, progressBar, node('span', 'kanban-check-pct', `${pct}%`));
 
     const listEl = node('div', 'kanban-card-checkitems');
-    for (const item of card.checklist) {
-      const itemLabel = node('label', `kanban-card-checkitem${item.done ? ' done' : ''}`);
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = item.done;
-      cb.disabled = !editMode;
-      if (editMode) {
-        cb.onchange = (e) => {
-          e.stopPropagation();
-          toggleKanbanChecklistItem(card.id, item.id);
-        };
-      }
-      itemLabel.append(cb, node('span', '', item.text));
-      listEl.append(itemLabel);
-    }
-
+    listEl.append(buildChecklistItems(card.checklist, (item) => toggleKanbanChecklistItem(card.id, item.id)));
     checkWrap.append(progressHead, listEl);
     el.append(checkWrap);
   }
 
-  // 5. Stopka karty: przyciski szybkiego przesuwania i edycji (tylko w trybie edycji)
   if (editMode) {
     const footer = node('div', 'kanban-card-foot');
     const actions = node('div', 'kanban-card-actions');
     if (colIndex > 0) {
       const prevCol = kanbanState.kanban.columns[colIndex - 1];
-      const leftBtn = node('button', 'kanban-icon-btn');
-      leftBtn.type = 'button';
-      leftBtn.title = `Przenieś do: ${prevCol.title}`;
-      leftBtn.setAttribute('aria-label', `Przenieś do: ${prevCol.title}`);
-      leftBtn.innerHTML = '<i class="ph ph-arrow-left"></i>';
-      leftBtn.onclick = (e) => {
+      actions.append(iconBtn('kanban-icon-btn', 'ph-arrow-left', `Przenieś do: ${prevCol.title}`, (e) => {
         e.stopPropagation();
         moveKanbanCardToColumn(card.id, prevCol.id);
-      };
-      actions.append(leftBtn);
+      }));
     }
-
     if (colIndex < totalCols - 1) {
       const nextCol = kanbanState.kanban.columns[colIndex + 1];
-      const rightBtn = node('button', 'kanban-icon-btn');
-      rightBtn.type = 'button';
-      rightBtn.title = `Przenieś do: ${nextCol.title}`;
-      rightBtn.setAttribute('aria-label', `Przenieś do: ${nextCol.title}`);
-      rightBtn.innerHTML = '<i class="ph ph-arrow-right"></i>';
-      rightBtn.onclick = (e) => {
+      actions.append(iconBtn('kanban-icon-btn', 'ph-arrow-right', `Przenieś do: ${nextCol.title}`, (e) => {
         e.stopPropagation();
         moveKanbanCardToColumn(card.id, nextCol.id);
-      };
-      actions.append(rightBtn);
+      }));
     }
-
-    const editBtn = node('button', 'kanban-icon-btn');
-    editBtn.type = 'button';
-    editBtn.title = 'Edytuj zadanie';
-    editBtn.setAttribute('aria-label', 'Edytuj zadanie');
-    editBtn.innerHTML = '<i class="ph ph-pencil-simple"></i>';
-    editBtn.onclick = (e) => {
+    actions.append(iconBtn('kanban-icon-btn', 'ph-pencil-simple', 'Edytuj zadanie', (e) => {
       e.stopPropagation();
       openKanbanCardDialog(card.id);
-    };
-    actions.append(editBtn);
-
+    }));
     footer.append(actions);
     el.append(footer);
   }
@@ -2575,93 +1884,53 @@ function renderKanban() {
   const allCards = kanbanState.kanban.cards;
   const filteredCards = getFilteredKanbanCards();
 
-  // Podsumowanie liczbowe nad tablicą
-  const summaryParts = cols.map((col) => {
-    const cnt = allCards.filter((c) => c.columnId === col.id).length;
-    return `${col.title}: ${cnt}`;
-  });
-  $('kanbanSummary').textContent = summaryParts.join(' · ') || 'Brak kolumn';
-
+  $('kanbanSummary').textContent = cols.map((col) => `${col.title}: ${allCards.filter((c) => c.columnId === col.id).length}`).join(' · ') || 'Brak kolumn';
   renderMobileKanbanTabs(filteredCards);
 
   const board = $('kanbanBoard');
   board.replaceChildren();
   board.style.setProperty('--kanban-cols', String(Math.max(1, cols.length)));
-
   const slideClass = kanbanMobileSlideDir;
   kanbanMobileSlideDir = '';
 
   cols.forEach((col, colIndex) => {
     const isLastCol = cols.length > 1 && colIndex === cols.length - 1;
-    let colClass = 'kanban-col';
-    if (colIndex === selectedKanbanColIndex) {
-      colClass += ' mobile-active';
-      if (slideClass) colClass += ` ${slideClass}`;
-    }
-    if (isLastCol) colClass += ' is-done-col';
-
-    const colEl = node('section', colClass);
+    const colEl = node('section', [
+      'kanban-col',
+      colIndex === selectedKanbanColIndex && 'mobile-active',
+      colIndex === selectedKanbanColIndex && slideClass,
+      isLastCol && 'is-done-col',
+    ].filter(Boolean).join(' '));
     colEl.dataset.columnId = col.id;
 
-    // Nagłówek kolumny
-    const head = node('div', 'kanban-col-head');
-    const titleWrap = node('div', 'kanban-col-title-wrap');
-    const colIcon =
-      colIndex === 0
-        ? 'ph-circle-dashed'
-        : isLastCol
-          ? 'ph-check-circle'
-          : 'ph-spinner-gap';
-    const iconEl = node('i', `ph ${colIcon}`);
-    const titleEl = node('h3', 'kanban-col-title', col.title);
     const colCards = filteredCards
       .filter((c) => c.columnId === col.id)
       .sort((a, b) => a.order - b.order || (PRIORITY_WEIGHT[a.priority] ?? 1) - (PRIORITY_WEIGHT[b.priority] ?? 1));
-    const countBadge = node('span', 'kanban-col-count', String(colCards.length));
-    titleWrap.append(iconEl, titleEl, countBadge);
+
+    const head = node('div', 'kanban-col-head');
+    const titleWrap = node('div', 'kanban-col-title-wrap');
+    const colIcon = colIndex === 0 ? 'ph-circle-dashed' : isLastCol ? 'ph-check-circle' : 'ph-spinner-gap';
+    titleWrap.append(node('i', `ph ${colIcon}`), node('h3', 'kanban-col-title', col.title), node('span', 'kanban-col-count', String(colCards.length)));
     head.append(titleWrap);
 
-    if (editMode) {
-      const addBtn = node('button', 'kanban-col-add-btn');
-      addBtn.type = 'button';
-      addBtn.title = `Dodaj zadanie w kolumnie „${col.title}”`;
-      addBtn.innerHTML = '<i class="ph ph-plus"></i>';
-      addBtn.onclick = () => openKanbanCardDialog(null, col.id);
-      head.append(addBtn);
-    }
-
+    if (editMode) head.append(iconBtn('kanban-col-add-btn', 'ph-plus', `Dodaj zadanie w kolumnie „${col.title}”`, () => openKanbanCardDialog(null, col.id)));
     colEl.append(head);
 
-    // Lista kart w kolumnie + obsługa Drag & Drop (tylko w trybie edycji)
     const cardsContainer = node('div', 'kanban-cards');
-
     if (editMode) {
-      colEl.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        colEl.classList.add('drag-over');
-      });
-      colEl.addEventListener('dragleave', (e) => {
-        if (!colEl.contains(e.relatedTarget)) {
-          colEl.classList.remove('drag-over');
-        }
-      });
+      colEl.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; colEl.classList.add('drag-over'); });
+      colEl.addEventListener('dragleave', (e) => { if (!colEl.contains(e.relatedTarget)) colEl.classList.remove('drag-over'); });
       colEl.addEventListener('drop', (e) => {
         e.preventDefault();
         colEl.classList.remove('drag-over');
         const cardId = draggedKanbanCardId || e.dataTransfer.getData('text/plain');
         if (!cardId) return;
-
-        // Wyznacz indeks docelowy na podstawie pozycji kursora Y względem kart w kolumnie
-        const cardElements = [...cardsContainer.querySelectorAll('.kanban-card:not(.dragging)')];
-        let targetIdx = cardElements.length;
-        for (let i = 0; i < cardElements.length; i++) {
-          const rect = cardElements[i].getBoundingClientRect();
-          if (e.clientY < rect.top + rect.height / 2) {
-            targetIdx = i;
-            break;
-          }
-        }
+        const els = [...cardsContainer.querySelectorAll('.kanban-card:not(.dragging)')];
+        let targetIdx = els.findIndex((cEl) => {
+          const r = cEl.getBoundingClientRect();
+          return e.clientY < r.top + r.height / 2;
+        });
+        if (targetIdx < 0) targetIdx = els.length;
         moveKanbanCardToColumn(cardId, col.id, targetIdx);
       });
     }
@@ -2679,9 +1948,7 @@ function renderKanban() {
         cardsContainer.append(emptyInfo);
       }
     } else {
-      for (const card of colCards) {
-        cardsContainer.append(renderKanbanCard(card, colIndex, cols.length, isLastCol));
-      }
+      for (const card of colCards) cardsContainer.append(renderKanbanCard(card, colIndex, cols.length, isLastCol));
     }
 
     colEl.append(cardsContainer);
@@ -2691,11 +1958,7 @@ function renderKanban() {
 
 // --- Okno dodawania / edycji zadania Kanban ----------------------------------
 
-const KANBAN_CUSTOM_SUBJECT = '__custom_subject__';
-const KANBAN_CUSTOM_CATEGORY = '__custom__';
-
 function populateKanbanCardFormSelects(selectedSubject = '', selectedCategory = 'Projekt', selectedColumnId = '') {
-  // 1. Kolumny
   const colSelect = $('kanbanCardColumn');
   colSelect.replaceChildren();
   for (const col of kanbanState.kanban.columns) {
@@ -2703,119 +1966,42 @@ function populateKanbanCardFormSelects(selectedSubject = '', selectedCategory = 
     opt.value = col.id;
     colSelect.append(opt);
   }
-  if (selectedColumnId && kanbanState.kanban.columns.some((c) => c.id === selectedColumnId)) {
-    colSelect.value = selectedColumnId;
-  }
+  if (selectedColumnId && kanbanState.kanban.columns.some((c) => c.id === selectedColumnId)) colSelect.value = selectedColumnId;
 
-  // 2. Przedmiot (z planu zajęć lub własny)
   const subjSelect = $('kanbanCardSubjectSelect');
-  const subjCustom = $('kanbanCardSubjectCustom');
   subjSelect.replaceChildren();
-
-  const noneOpt = node('option', '', '— Ogólne / bez przedmiotu —');
-  noneOpt.value = '';
-  subjSelect.append(noneOpt);
-
-  const knownSubjectNames = new Set();
-  for (const s of state.plan.subjects) {
-    if (s.name?.trim()) knownSubjectNames.add(s.name.trim());
-  }
-  for (const c of kanbanState.kanban.cards) {
-    if (c.subjectName?.trim()) knownSubjectNames.add(c.subjectName.trim());
-  }
-
-  for (const name of [...knownSubjectNames].sort((a, b) => a.localeCompare(b, 'pl'))) {
-    const opt = node('option', '', name);
-    opt.value = name;
+  const knownSubjects = getKnownSubjectNames();
+  const opts = [['', '— Ogólne / bez przedmiotu —'], ...knownSubjects.map((n) => [n, n]), [KANBAN_CUSTOM_SUBJECT, '✎ Inny przedmiot / projekt (wpisz)...']];
+  for (const [val, label] of opts) {
+    const opt = node('option', '', label);
+    opt.value = val;
     subjSelect.append(opt);
   }
 
-  const customSubjOpt = node('option', '', '✎ Inny przedmiot / projekt (wpisz)...');
-  customSubjOpt.value = KANBAN_CUSTOM_SUBJECT;
-  subjSelect.append(customSubjOpt);
-
-  if (!selectedSubject) {
-    subjSelect.value = '';
-    subjCustom.value = '';
-    subjCustom.hidden = true;
-    subjCustom.required = false;
-  } else if (knownSubjectNames.has(selectedSubject)) {
-    subjSelect.value = selectedSubject;
-    subjCustom.value = '';
-    subjCustom.hidden = true;
-    subjCustom.required = false;
-  } else {
-    subjSelect.value = KANBAN_CUSTOM_SUBJECT;
-    subjCustom.value = selectedSubject;
-    subjCustom.hidden = false;
-    subjCustom.required = true;
-  }
-
-  // 3. Kategoria zadania
-  const catSelect = $('kanbanCardCategorySelect');
-  const catCustom = $('kanbanCardCategoryCustom');
-  const matchingCat = Array.from(catSelect.options).find(
-    (o) => o.value !== KANBAN_CUSTOM_CATEGORY && o.value.toLowerCase() === (selectedCategory || '').toLowerCase(),
-  );
-  if (matchingCat) {
-    catSelect.value = matchingCat.value;
-    catCustom.value = '';
-    catCustom.hidden = true;
-    catCustom.required = false;
-  } else {
-    catSelect.value = KANBAN_CUSTOM_CATEGORY;
-    catCustom.value = selectedCategory || '';
-    catCustom.hidden = false;
-    catCustom.required = true;
-  }
-}
-
-function updateKanbanSubjectSelectFields() {
-  const isCustom = $('kanbanCardSubjectSelect').value === KANBAN_CUSTOM_SUBJECT;
-  const input = $('kanbanCardSubjectCustom');
-  input.hidden = !isCustom;
-  input.required = isCustom;
-  if (isCustom) input.focus();
-}
-
-function updateKanbanCategorySelectFields() {
-  const isCustom = $('kanbanCardCategorySelect').value === KANBAN_CUSTOM_CATEGORY;
-  const input = $('kanbanCardCategoryCustom');
-  input.hidden = !isCustom;
-  input.required = isCustom;
-  if (isCustom) input.focus();
+  syncCustomSelect(subjSelect, $('kanbanCardSubjectCustom'), selectedSubject, KANBAN_CUSTOM_SUBJECT, '');
+  syncCustomSelect($('kanbanCardCategorySelect'), $('kanbanCardCategoryCustom'), selectedCategory, KANBAN_CUSTOM_CATEGORY, '');
 }
 
 function renderDraftChecklist() {
   const container = $('kanbanChecklistItems');
   container.replaceChildren();
-
   draftChecklist.forEach((item, idx) => {
     const row = node('div', 'kanban-draft-checkrow');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = item.done;
-    cb.onchange = () => {
-      item.done = cb.checked;
-    };
+    cb.onchange = () => { item.done = cb.checked; };
 
     const textInput = document.createElement('input');
     textInput.type = 'text';
     textInput.value = item.text;
     textInput.maxLength = 200;
-    textInput.oninput = () => {
-      item.text = textInput.value;
-    };
+    textInput.oninput = () => { item.text = textInput.value; };
 
-    const removeBtn = node('button', 'danger kanban-icon-btn');
-    removeBtn.type = 'button';
-    removeBtn.title = 'Usuń podpunkt';
-    removeBtn.innerHTML = '<i class="ph ph-x"></i>';
-    removeBtn.onclick = () => {
+    const removeBtn = iconBtn('danger kanban-icon-btn', 'ph-x', 'Usuń podpunkt', () => {
       draftChecklist.splice(idx, 1);
       renderDraftChecklist();
-    };
-
+    });
     row.append(cb, textInput, removeBtn);
     container.append(row);
   });
@@ -2844,10 +2030,7 @@ function openKanbanCardDialog(cardId = null, defaultColumnId = null) {
   $('kanbanCardError').textContent = '';
   $('kanbanNewCheckItem').value = '';
 
-  const fallbackColId =
-    defaultColumnId ||
-    kanbanState.kanban.columns[selectedKanbanColIndex]?.id ||
-    kanbanState.kanban.columns[0]?.id;
+  const fallbackColId = defaultColumnId || kanbanState.kanban.columns[selectedKanbanColIndex]?.id || kanbanState.kanban.columns[0]?.id;
 
   if (card) {
     $('kanbanCardDialogTitle').textContent = 'Edytuj zadanie';
@@ -2864,8 +2047,7 @@ function openKanbanCardDialog(cardId = null, defaultColumnId = null) {
     $('kanbanCardDueDate').value = '';
     $('kanbanCardDesc').value = '';
     const activeFilterSubj = $('kanbanFilterSubject')?.value || '';
-    const initialSubj = activeFilterSubj && activeFilterSubj !== '__none__' ? activeFilterSubj : '';
-    populateKanbanCardFormSelects(initialSubj, 'Projekt', fallbackColId);
+    populateKanbanCardFormSelects(activeFilterSubj && activeFilterSubj !== '__none__' ? activeFilterSubj : '', 'Projekt', fallbackColId);
     draftChecklist = [];
     $('deleteKanbanCardBtn').hidden = true;
   }
@@ -2877,7 +2059,6 @@ function openKanbanCardDialog(cardId = null, defaultColumnId = null) {
 function saveKanbanCard(event) {
   event.preventDefault();
   try {
-    // Jeśli użytkownik wpisał tekst podzadania i od razu kliknął „Zapisz zadanie”, dołączamy je
     const pendingCheck = $('kanbanNewCheckItem').value.trim();
     if (pendingCheck && draftChecklist.length < 50) {
       draftChecklist.push({ id: uid(), text: pendingCheck, done: false });
@@ -2893,12 +2074,9 @@ function saveKanbanCard(event) {
     const description = $('kanbanCardDesc').value.trim();
 
     const subjVal = $('kanbanCardSubjectSelect').value;
-    const subjectName =
-      subjVal === KANBAN_CUSTOM_SUBJECT ? $('kanbanCardSubjectCustom').value.trim() : subjVal.trim();
-
+    const subjectName = subjVal === KANBAN_CUSTOM_SUBJECT ? $('kanbanCardSubjectCustom').value.trim() : subjVal.trim();
     const catVal = $('kanbanCardCategorySelect').value;
-    const category =
-      catVal === KANBAN_CUSTOM_CATEGORY ? $('kanbanCardCategoryCustom').value.trim() : catVal.trim();
+    const category = catVal === KANBAN_CUSTOM_CATEGORY ? $('kanbanCardCategoryCustom').value.trim() : catVal.trim();
 
     const checklist = draftChecklist
       .map((item) => ({ id: item.id || uid(), text: item.text.trim(), done: !!item.done }))
@@ -2909,20 +2087,9 @@ function saveKanbanCard(event) {
         const existing = kanban.cards.find((c) => c.id === editingKanbanCardId);
         if (!existing) return;
         const colChanged = existing.columnId !== columnId;
-        existing.title = title;
-        existing.columnId = columnId;
-        existing.priority = priority;
-        existing.dueDate = dueDate;
-        existing.description = description;
-        existing.subjectName = subjectName;
-        existing.category = category;
-        existing.checklist = checklist;
-        if (colChanged) {
-          const sameCol = kanban.cards.filter((c) => c.columnId === columnId && c.id !== existing.id);
-          existing.order = sameCol.length;
-        }
+        Object.assign(existing, { title, columnId, priority, dueDate, description, subjectName, category, checklist });
+        if (colChanged) existing.order = kanban.cards.filter((c) => c.columnId === columnId && c.id !== existing.id).length;
       } else {
-        const sameCol = kanban.cards.filter((c) => c.columnId === columnId);
         kanban.cards.push({
           id: uid(),
           columnId,
@@ -2933,11 +2100,10 @@ function saveKanbanCard(event) {
           priority,
           dueDate,
           checklist,
-          order: sameCol.length,
+          order: kanban.cards.filter((c) => c.columnId === columnId).length,
         });
       }
     });
-
     $('kanbanCardDialog').close();
   } catch (err) {
     $('kanbanCardError').textContent = err.message;
@@ -2945,12 +2111,9 @@ function saveKanbanCard(event) {
 }
 
 function deleteKanbanCard() {
-  if (!editingKanbanCardId) return;
-  if (!confirm('Czy na pewno usunąć to zadanie z tablicy Kanban?')) return;
+  if (!editingKanbanCardId || !confirm('Czy na pewno usunąć to zadanie z tablicy Kanban?')) return;
   try {
-    mutateKanban((kanban) => {
-      kanban.cards = kanban.cards.filter((c) => c.id !== editingKanbanCardId);
-    });
+    mutateKanban((kanban) => { kanban.cards = kanban.cards.filter((c) => c.id !== editingKanbanCardId); });
     $('kanbanCardDialog').close();
   } catch (err) {
     $('kanbanCardError').textContent = err.message;
@@ -2962,12 +2125,18 @@ function deleteKanbanCard() {
 function renderKanbanColumnsList() {
   const container = $('kanbanColumnsList');
   container.replaceChildren();
-
   const cols = kanbanState.kanban.columns;
+
+  const moveCol = (idx, delta) => {
+    mutateKanban((kanban) => {
+      [kanban.columns[idx], kanban.columns[idx + delta]] = [kanban.columns[idx + delta], kanban.columns[idx]];
+    });
+    renderKanbanColumnsList();
+  };
+
   cols.forEach((col, idx) => {
     const count = kanbanState.kanban.cards.filter((c) => c.columnId === col.id).length;
     const row = node('div', 'seriesrow');
-
     const input = document.createElement('input');
     input.type = 'text';
     input.value = col.title;
@@ -2975,10 +2144,7 @@ function renderKanbanColumnsList() {
     input.ariaLabel = 'Nazwa kolumny';
     input.onchange = () => {
       const nextTitle = input.value.trim();
-      if (!nextTitle) {
-        input.value = col.title;
-        return;
-      }
+      if (!nextTitle) { input.value = col.title; return; }
       try {
         mutateKanban((kanban) => {
           const target = kanban.columns.find((c) => c.id === col.id);
@@ -2991,54 +2157,21 @@ function renderKanbanColumnsList() {
     };
 
     const actions = node('div', 'actions');
-
-    if (idx > 0) {
-      const upBtn = node('button', 'kanban-icon-btn');
-      upBtn.type = 'button';
-      upBtn.title = 'Przesuń w lewo / wyżej';
-      upBtn.innerHTML = '<i class="ph ph-arrow-up"></i>';
-      upBtn.onclick = () => {
-        mutateKanban((kanban) => {
-          const temp = kanban.columns[idx - 1];
-          kanban.columns[idx - 1] = kanban.columns[idx];
-          kanban.columns[idx] = temp;
-        });
-        renderKanbanColumnsList();
-      };
-      actions.append(upBtn);
-    }
-
-    if (idx < cols.length - 1) {
-      const downBtn = node('button', 'kanban-icon-btn');
-      downBtn.type = 'button';
-      downBtn.title = 'Przesuń w prawo / niżej';
-      downBtn.innerHTML = '<i class="ph ph-arrow-down"></i>';
-      downBtn.onclick = () => {
-        mutateKanban((kanban) => {
-          const temp = kanban.columns[idx + 1];
-          kanban.columns[idx + 1] = kanban.columns[idx];
-          kanban.columns[idx] = temp;
-        });
-        renderKanbanColumnsList();
-      };
-      actions.append(downBtn);
-    }
+    if (idx > 0) actions.append(iconBtn('kanban-icon-btn', 'ph-arrow-up', 'Przesuń w lewo / wyżej', () => moveCol(idx, -1)));
+    if (idx < cols.length - 1) actions.append(iconBtn('kanban-icon-btn', 'ph-arrow-down', 'Przesuń w prawo / niżej', () => moveCol(idx, 1)));
 
     const delBtn = node('button', 'danger', count > 0 ? `Zajęta (${count})` : 'Usuń');
     delBtn.type = 'button';
     delBtn.disabled = cols.length <= 1 || count > 0;
     delBtn.onclick = () => {
       try {
-        mutateKanban((kanban) => {
-          kanban.columns = kanban.columns.filter((c) => c.id !== col.id);
-        });
+        mutateKanban((kanban) => { kanban.columns = kanban.columns.filter((c) => c.id !== col.id); });
         renderKanbanColumnsList();
       } catch (err) {
         $('kanbanColumnsError').textContent = err.message;
       }
     };
     actions.append(delBtn);
-
     row.append(input, actions);
     container.append(row);
   });
@@ -3057,9 +2190,7 @@ function addKanbanColumn(event) {
     const title = $('newKanbanColumnTitle').value.trim();
     if (!title) return;
     mutateKanban((kanban) => {
-      if (kanban.columns.length >= 12) {
-        throw Error('Maksymalnie 12 kolumn w tablicy Kanban.');
-      }
+      if (kanban.columns.length >= 12) throw Error('Maksymalnie 12 kolumn w tablicy Kanban.');
       kanban.columns.push({ id: uid(), title });
     });
     $('newKanbanColumnTitle').value = '';
@@ -3079,57 +2210,34 @@ function clearKanbanDone() {
     setStatus(`W kolumnie „${doneCol.title}” nie ma żadnych ukończonych zadań do usunięcia.`);
     return;
   }
-  if (
-    !confirm(
-      `Usunąć wszystkie zadania (${doneCards.length}) z kolumny „${doneCol.title}”?`,
-    )
-  ) {
-    return;
-  }
-  mutateKanban((kanban) => {
-    kanban.cards = kanban.cards.filter((c) => c.columnId !== doneCol.id);
-  });
+  if (!confirm(`Usunąć wszystkie zadania (${doneCards.length}) z kolumny „${doneCol.title}”?`)) return;
+  mutateKanban((kanban) => { kanban.cards = kanban.cards.filter((c) => c.columnId !== doneCol.id); });
   setStatus(`Usunięto ${doneCards.length} ukończonych zadań z kolumny „${doneCol.title}”.`);
 }
 
 function resetKanbanBoard() {
-  if (
-    !confirm(
-      'Czy na pewno wyczyścić całą tablicę Kanban do domyślnych 3 kolumn i usunąć wszystkie zadania?',
-    )
-  ) {
-    return;
-  }
-  mutateKanban((kanban) => {
-    Object.assign(kanban, emptyKanban());
-  });
+  if (!confirm('Czy na pewno wyczyścić całą tablicę Kanban do domyślnych 3 kolumn i usunąć wszystkie zadania?')) return;
+  mutateKanban((kanban) => { Object.assign(kanban, emptyKanban()); });
   setStatus('Tablica Kanban została zresetowana. Kliknij „Zapisz tablicę w chmurze”, jeśli chcesz nadpisać też plik kanban.json w chmurze.');
 }
 
-// --- Nawigacja po tygodniach -------------------------------------------------
+// --- Nawigacja, import i eksport ---------------------------------------------
 
 function showWeek(newWeek) {
   week = newWeek;
   render();
 }
 
-// --- Import / eksport (osobny plik dla Planu i osobny dla tablicy Kanban) ---
-
 function exportActiveView() {
   const isKanban = activeView === 'kanban';
   const payload = isKanban ? kanbanState.kanban : state.plan;
-  const customBase = isKanban ? getActiveKanbanId() : getActivePlanId();
-  const baseName = customBase || (isKanban ? 'kanban' : 'plan');
-  const filename = `${baseName}-${today()}.json`;
-
-  const json = JSON.stringify(payload, null, 2);
-  const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+  const baseName = getActiveId(isKanban ? 'kanban' : 'plan') || (isKanban ? 'kanban' : 'plan');
+  const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
 
   const link = node('a');
   link.href = url;
-  link.download = filename;
+  link.download = `${baseName}-${today()}.json`;
   link.click();
-
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
@@ -3141,35 +2249,15 @@ async function importActiveView() {
     if (file.size > MAX_IMPORT_BYTES) throw Error('Maksymalny rozmiar pliku to 2 MB.');
 
     const parsed = JSON.parse(await file.text());
-
-    // Automatyczne rozpoznanie, czy użytkownik wgrywa plik tablicy Kanban czy plik planu zajęć
     const looksLikeKanban = Array.isArray(parsed?.columns) && Array.isArray(parsed?.cards);
+    const target = looksLikeKanban || activeView === 'kanban' ? 'kanban' : 'plan';
+    const isKanban = target === 'kanban';
+    const validated = TARGETS[target].validate(parsed);
 
-    if (looksLikeKanban || activeView === 'kanban') {
-      const kanban = validateKanban(parsed);
-      if (
-        !confirm(
-          'Zastąpić lokalną tablicę Kanban danymi z pliku JSON? W razie potrzeby najpierw wyeksportuj obecną kopię.',
-        )
-      ) {
-        return;
-      }
-      if (activeView !== 'kanban') setActiveView('kanban');
-      mutateKanban((current) => Object.assign(current, kanban));
-      setStatus('Zaimportowano tablicę Kanban z pliku JSON.');
-    } else {
-      const plan = validatePlan(parsed);
-      if (
-        !confirm(
-          'Zastąpić lokalny plan zajęć danymi z pliku JSON? W razie potrzeby najpierw wyeksportuj obecną kopię.',
-        )
-      ) {
-        return;
-      }
-      if (activeView !== 'calendar') setActiveView('calendar');
-      mutate((current) => Object.assign(current, plan));
-      setStatus('Zaimportowano plan zajęć z pliku JSON.');
-    }
+    if (!confirm(`Zastąpić lokalny ${isKanban ? 'zapis tablicy Kanban' : 'plan zajęć'} danymi z pliku JSON? W razie potrzeby najpierw wyeksportuj obecną kopię.`)) return;
+    if (activeView !== (isKanban ? 'kanban' : 'calendar')) setActiveView(isKanban ? 'kanban' : 'calendar');
+    mutateTarget(target, (current) => Object.assign(current, validated));
+    setStatus(isKanban ? 'Zaimportowano tablicę Kanban z pliku JSON.' : 'Zaimportowano plan zajęć z pliku JSON.');
   } catch (err) {
     setStatus(err instanceof SyntaxError ? 'Plik nie jest prawidłowym JSON-em.' : err.message);
   } finally {
@@ -3177,52 +2265,35 @@ async function importActiveView() {
   }
 }
 
-// --- Klucz dostępu i synchronizacja z chmurą ---------------------------------
+// --- Klucz dostępu i synchronizacja z chmurą (ręczna i auto-sync) ------------
 
-function getActivePlanId() {
+function getActiveId(target) {
   try {
-    return (localStorage.getItem(PLAN_ID_KEY) || '').trim().toLowerCase();
-  } catch {
-    return '';
-  }
-}
-
-function getActiveKanbanId() {
-  try {
-    return (localStorage.getItem(KANBAN_ID_KEY) || '').trim().toLowerCase();
+    return (localStorage.getItem(TARGETS[target].idKey) || '').trim().toLowerCase();
   } catch {
     return '';
   }
 }
 
 function updateConnectionPreviews() {
-  const rawPlan = ($('planId')?.value || '').trim().toLowerCase();
-  const rawKanban = ($('kanbanId')?.value || '').trim().toLowerCase();
-
-  try {
-    const planKey = resolvePlanKey(rawPlan);
-    $('planKeyPreview').innerHTML = `Plik w chmurze: <code>${planKey}</code>`;
-  } catch {
-    $('planKeyPreview').textContent = 'Dozwolone tylko litery bez polskich znaków, cyfry, - i _';
-  }
-
-  try {
-    const kanbanKey = resolveKanbanKey(rawKanban);
-    $('kanbanKeyPreview').innerHTML = `Plik w chmurze: <code>${kanbanKey}</code>`;
-  } catch {
-    $('kanbanKeyPreview').textContent = 'Dozwolone tylko litery bez polskich znaków, cyfry, - i _';
-  }
+  const setPreview = (elId, resolver, rawVal) => {
+    try {
+      $(elId).innerHTML = `Plik w chmurze: <code>${resolver(rawVal)}</code>`;
+    } catch {
+      $(elId).textContent = 'Dozwolone tylko litery bez polskich znaków, cyfry, - i _';
+    }
+  };
+  setPreview('planKeyPreview', resolvePlanKey, ($('planId')?.value || '').trim().toLowerCase());
+  setPreview('kanbanKeyPreview', resolveKanbanKey, ($('kanbanId')?.value || '').trim().toLowerCase());
 }
 
 function updateConnectionButtonLabel() {
   const btn = $('connection');
   if (!btn) return;
-  const planId = getActivePlanId();
-  const kanbanId = getActiveKanbanId();
-  const planFile = planId ? `${planId}.json` : 'plan.json';
-  const kanbanFile = kanbanId ? `${kanbanId}.json` : 'kanban.json';
+  const planId = getActiveId('plan');
+  const kanbanId = getActiveId('kanban');
   btn.innerHTML = '<i class="ph ph-key"></i> Ustawienia chmury';
-  btn.title = `Plik planu: ${planFile} · Plik Kanban: ${kanbanFile}`;
+  btn.title = `Plik planu: ${planId ? `${planId}.json` : 'plan.json'} · Plik Kanban: ${kanbanId ? `${kanbanId}.json` : 'kanban.json'}`;
 }
 
 function isAutoSyncEnabled() {
@@ -3236,8 +2307,7 @@ function isAutoSyncEnabled() {
 
 function hasCloudToken() {
   try {
-    const t = (localStorage.getItem(TOKEN_KEY) || '').trim();
-    return t.length >= MIN_TOKEN_LENGTH;
+    return (localStorage.getItem(TOKEN_KEY) || '').trim().length >= MIN_TOKEN_LENGTH;
   } catch {
     return false;
   }
@@ -3248,9 +2318,7 @@ function updateCloudStatusIndicator(stateOverride = null, detailOverride = null)
   const labelEl = $('cloudStatusText');
   if (!badge || !labelEl) return;
 
-  if (detailOverride !== null) {
-    cloudSyncDetail = detailOverride;
-  }
+  if (detailOverride !== null) cloudSyncDetail = detailOverride;
 
   let effectiveState = 'synced';
   let text = 'Zsynchronizowano';
@@ -3275,7 +2343,6 @@ function updateCloudStatusIndicator(stateOverride = null, detailOverride = null)
       ? 'Masz lokalne zmiany oczekujące na automatyczny zapis w chmurze'
       : 'Masz lokalne zmiany — auto-synchronizacja jest wyłączona (zapisz ręcznie w Menu)';
   } else if (!isAutoSyncEnabled()) {
-    effectiveState = 'synced';
     text = 'Auto-synchr. wył.';
     title = 'Automatyczna synchronizacja wyłączona — brak niezapisanych zmian';
   }
@@ -3287,8 +2354,8 @@ function updateCloudStatusIndicator(stateOverride = null, detailOverride = null)
 
 function openConnectionDialog() {
   try {
-    $('planId').value = getActivePlanId();
-    $('kanbanId').value = getActiveKanbanId();
+    $('planId').value = getActiveId('plan');
+    $('kanbanId').value = getActiveId('kanban');
     $('token').value = localStorage.getItem(TOKEN_KEY) || '';
     $('autoSyncEnabled').checked = isAutoSyncEnabled();
     $('connectionError').textContent = '';
@@ -3304,89 +2371,56 @@ function saveConnection(event) {
   try {
     const rawPlanId = $('planId').value.trim().toLowerCase();
     const rawKanbanId = $('kanbanId').value.trim().toLowerCase();
-
-    // Walidacja formatu nazwy/ID osobno dla planu i osobno dla tablicy Kanban
     const planKey = resolvePlanKey(rawPlanId);
     const kanbanKey = resolveKanbanKey(rawKanbanId);
 
     const token = $('token').value.trim();
-    if (token && token.length < MIN_TOKEN_LENGTH) {
-      throw Error(`Klucz musi mieć minimum ${MIN_TOKEN_LENGTH} znaki.`);
-    }
+    if (token && token.length < MIN_TOKEN_LENGTH) throw Error(`Klucz musi mieć minimum ${MIN_TOKEN_LENGTH} znaki.`);
 
     const autoSyncEnabled = $('autoSyncEnabled').checked;
-    const prevPlanId = getActivePlanId();
-    const prevKanbanId = getActiveKanbanId();
+    const prevPlanId = getActiveId('plan');
+    const prevKanbanId = getActiveId('kanban');
 
-    if (rawPlanId) localStorage.setItem(PLAN_ID_KEY, rawPlanId);
-    else localStorage.removeItem(PLAN_ID_KEY);
-
-    if (rawKanbanId) localStorage.setItem(KANBAN_ID_KEY, rawKanbanId);
-    else localStorage.removeItem(KANBAN_ID_KEY);
-
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
-
+    const saveOrRemove = (key, val) => (val ? localStorage.setItem(key, val) : localStorage.removeItem(key));
+    saveOrRemove(PLAN_ID_KEY, rawPlanId);
+    saveOrRemove(KANBAN_ID_KEY, rawKanbanId);
+    saveOrRemove(TOKEN_KEY, token);
     localStorage.setItem(AUTO_SYNC_KEY, String(autoSyncEnabled));
 
-    if (rawPlanId !== prevPlanId) {
-      const next = clone(state);
-      next.etag = null;
-      persist(next);
-    }
-
-    if (rawKanbanId !== prevKanbanId) {
-      const nextKanban = clone(kanbanState);
-      nextKanban.etag = null;
-      persistKanban(nextKanban);
-    }
+    if (rawPlanId !== prevPlanId) persistTarget('plan', { ...clone(state), etag: null });
+    if (rawKanbanId !== prevKanbanId) persistTarget('kanban', { ...clone(kanbanState), etag: null });
 
     cloudSyncState = hasCloudToken() ? 'synced' : 'unconfigured';
     updateConnectionButtonLabel();
     updateCloudStatusIndicator();
     $('connectionError').textContent = '';
     $('connectionDialog').close();
-    setStatus(
-      `Zapisano ustawienia chmury (plan: ${planKey} · tablica Kanban: ${kanbanKey} · auto-synchr.: ${autoSyncEnabled ? 'wł.' : 'wył.'}).`,
-    );
-
-    if (token && autoSyncEnabled) {
-      autoPullFromCloud(true);
-    }
+    setStatus(`Zapisano ustawienia chmury (plan: ${planKey} · tablica Kanban: ${kanbanKey} · auto-synchr.: ${autoSyncEnabled ? 'wł.' : 'wył.'}).`);
+    if (token && autoSyncEnabled) autoPullFromCloud(true);
   } catch (err) {
     $('connectionError').textContent = err.message;
   }
 }
 
-function setButtonsDisabled(disabled) {
+const setButtonsDisabled = (disabled) => {
   for (const button of document.querySelectorAll('button')) button.disabled = disabled;
-}
+};
 
-/** Wysyła żądanie do Workera (/api/plan lub /api/kanban) bez okien confirm (do auto-synchronizacji). */
-async function callApiSilent(direction, token, planId, target = 'plan', { keepalive = false, payloadJson = null, etagOverride = undefined } = {}) {
-  const isKanban = target === 'kanban';
-  const baseUrl = isKanban ? KANBAN_API_URL : API_URL;
-  const url = planId ? `${baseUrl}?id=${encodeURIComponent(planId)}` : baseUrl;
+/** Wspólny klient API Workera (/api/plan i /api/kanban) dla sync ręcznego i automatycznego. */
+async function callApi(direction, token, planId, target = 'plan', { silent = false, keepalive = false, payloadJson = null, etagOverride = undefined } = {}) {
+  const cfg = TARGETS[target];
+  const st = cfg.getState();
+  const url = planId ? `${cfg.apiUrl}?id=${encodeURIComponent(planId)}` : cfg.apiUrl;
   const headers = { Authorization: 'Bearer ' + token };
-  const options = {
-    method: 'GET',
-    headers,
-    cache: 'no-store',
-    keepalive: Boolean(keepalive),
-  };
-  if (!keepalive) {
-    options.signal = AbortSignal.timeout(API_TIMEOUT_MS);
-  }
-
-  const currentObj = isKanban ? kanbanState.kanban : state.plan;
-  const currentEtag = isKanban ? kanbanState.etag : state.etag;
+  const options = { method: 'GET', headers, cache: 'no-store', keepalive: Boolean(keepalive) };
+  if (!keepalive) options.signal = AbortSignal.timeout(API_TIMEOUT_MS);
 
   if (direction === 'push') {
     options.method = 'PUT';
-    options.body = payloadJson ?? JSON.stringify(currentObj);
+    options.body = payloadJson ?? JSON.stringify(st[cfg.prop]);
     headers['Content-Type'] = 'application/json';
-    const etagToUse = etagOverride !== undefined ? etagOverride : currentEtag;
-    if (etagToUse) headers['If-Match'] = `"${etagToUse}"`;
+    const etag = etagOverride !== undefined ? etagOverride : st.etag;
+    if (etag) headers['If-Match'] = `"${etag}"`;
     else headers['If-None-Match'] = '*';
   }
 
@@ -3395,77 +2429,68 @@ async function callApiSilent(direction, token, planId, target = 'plan', { keepal
   try {
     data = await response.json();
   } catch {
-    throw Error('API nie jest dostępne.');
+    throw Error(silent ? 'API nie jest dostępne.' : 'API nie jest dostępne. Uruchom projekt przez npm run dev albo wdróż Worker.');
   }
 
   if (response.status === 409) {
-    const err = Error(data.error || 'Konflikt wersji w chmurze.');
-    err.isConflict = true;
-    throw err;
+    if (silent) {
+      const err = Error(data.error || 'Konflikt wersji w chmurze.');
+      err.isConflict = true;
+      throw err;
+    }
+    if (direction === 'push' && etagOverride === undefined) {
+      if (confirm(`W chmurze dla ${cfg.nounGen} „${planId || 'domyślny'}” znajduje się już inna zapisana wersja. Czy chcesz ją nadpisać swoją obecną wersją lokalną?`)) {
+        const remote = await callApi('pull', token, planId, target);
+        return callApi('push', token, planId, target, { etagOverride: remote.etag });
+      }
+    }
   }
 
-  if (!response.ok) throw Error(data.error || 'Błąd połączenia z chmurą.');
+  if (!response.ok) throw Error(data.error || (silent ? 'Błąd połączenia z chmurą.' : 'Błąd połączenia.'));
   return data;
 }
 
 async function runAutoPush(target, { keepalive = false } = {}) {
-  if (busy || storageBlocked || !hasCloudToken() || !isAutoSyncEnabled()) {
-    updateCloudStatusIndicator();
-    return;
-  }
-
-  const isKanban = target === 'kanban';
-  const isDirty = isKanban ? kanbanState.dirty : state.dirty;
-  if (!isDirty) {
+  const cfg = TARGETS[target];
+  if (busy || storageBlocked || !hasCloudToken() || !isAutoSyncEnabled() || !cfg.getState().dirty) {
     updateCloudStatusIndicator();
     return;
   }
 
   const token = (localStorage.getItem(TOKEN_KEY) || '').trim();
-  const activeId = isKanban ? getActiveKanbanId() : getActivePlanId();
-  const fileKey = isKanban ? resolveKanbanKey(activeId) : resolvePlanKey(activeId);
-  const snapshotObj = isKanban ? kanbanState.kanban : state.plan;
-  const snapshotJson = JSON.stringify(snapshotObj);
-  const etagAtSend = isKanban ? kanbanState.etag : state.etag;
+  const activeId = getActiveId(target);
+  const fileKey = cfg.resolveKey(activeId);
+  const st = cfg.getState();
+  const snapshotJson = JSON.stringify(st[cfg.prop]);
 
   autoSyncInFlight++;
   if (cloudSyncState === 'error') cloudSyncState = 'pending';
   updateCloudStatusIndicator();
 
   try {
-    const data = await callApiSilent('push', token, activeId, target, {
+    const data = await callApi('push', token, activeId, target, {
+      silent: true,
       keepalive,
       payloadJson: snapshotJson,
-      etagOverride: etagAtSend,
+      etagOverride: st.etag,
     });
 
     if (!storageBlocked) {
-      if (isKanban) {
-        const stillSame = JSON.stringify(kanbanState.kanban) === snapshotJson;
-        const next = clone(kanbanState);
-        next.etag = data.etag;
-        if (stillSame) next.dirty = false;
-        persistKanban(next);
-      } else {
-        const stillSame = JSON.stringify(state.plan) === snapshotJson;
-        const next = clone(state);
-        next.etag = data.etag;
-        if (stillSame) next.dirty = false;
-        persist(next);
-      }
+      const current = cfg.getState();
+      const stillSame = JSON.stringify(current[cfg.prop]) === snapshotJson;
+      const next = clone(current);
+      next.etag = data.etag;
+      if (stillSame) next.dirty = false;
+      persistTarget(target, next);
     }
 
     const timeLabel = new Date().toLocaleTimeString('pl-PL');
     cloudSyncState = 'synced';
     cloudSyncDetail = timeLabel;
-    if (!state.dirty && !kanbanState.dirty) {
-      setStatus(`Auto-zapis w chmurze (${fileKey}) · ${timeLabel}.`);
-    }
+    if (!state.dirty && !kanbanState.dirty) setStatus(`Auto-zapis w chmurze (${fileKey}) · ${timeLabel}.`);
   } catch (err) {
     cloudSyncState = 'error';
-    cloudSyncDetail = err.isConflict
-      ? `Konflikt wersji (${fileKey}) — pobierz lub nadpisz ręcznie w Menu`
-      : `${err.message}`;
+    cloudSyncDetail = err.isConflict ? `Konflikt wersji (${fileKey}) — pobierz lub nadpisz ręcznie w Menu` : `${err.message}`;
     setStatus(
       err.isConflict
         ? `Konflikt wersji w chmurze (${fileKey}) — kliknij „Pobierz z chmury” lub „Zapisz w chmurze” w Menu.`
@@ -3478,54 +2503,51 @@ async function runAutoPush(target, { keepalive = false } = {}) {
 }
 
 function scheduleAutoPush(target) {
-  if (cloudSyncState === 'error') {
-    cloudSyncState = 'dirty';
-  }
+  if (cloudSyncState === 'error') cloudSyncState = 'dirty';
   if (!hasCloudToken() || !isAutoSyncEnabled() || storageBlocked) {
     updateCloudStatusIndicator();
     return;
   }
-
-  if (target === 'kanban') {
-    if (kanbanAutoSaveTimer !== null) clearTimeout(kanbanAutoSaveTimer);
-    kanbanAutoSaveTimer = setTimeout(() => {
-      kanbanAutoSaveTimer = null;
-      runAutoPush('kanban');
-    }, AUTO_SAVE_DELAY_MS);
-  } else {
-    if (planAutoSaveTimer !== null) clearTimeout(planAutoSaveTimer);
-    planAutoSaveTimer = setTimeout(() => {
-      planAutoSaveTimer = null;
-      runAutoPush('plan');
-    }, AUTO_SAVE_DELAY_MS);
-  }
-
+  const cfg = TARGETS[target];
+  if (cfg.getTimer() !== null) clearTimeout(cfg.getTimer());
+  cfg.setTimer(setTimeout(() => {
+    cfg.setTimer(null);
+    runAutoPush(target);
+  }, AUTO_SAVE_DELAY_MS));
   updateCloudStatusIndicator();
 }
 
 function flushPendingAutoPushKeepalive() {
   if (!hasCloudToken() || !isAutoSyncEnabled() || storageBlocked || busy) return;
+  for (const target of ['plan', 'kanban']) {
+    const cfg = TARGETS[target];
+    if (cfg.getTimer() !== null) {
+      clearTimeout(cfg.getTimer());
+      cfg.setTimer(null);
+    }
+    if (cfg.getState().dirty) runAutoPush(target, { keepalive: true });
+  }
+}
 
-  let hadPendingPlan = false;
-  let hadPendingKanban = false;
-
-  if (planAutoSaveTimer !== null) {
-    clearTimeout(planAutoSaveTimer);
-    planAutoSaveTimer = null;
-    hadPendingPlan = true;
+async function autoPullTarget(target, token) {
+  const cfg = TARGETS[target];
+  const st = cfg.getState();
+  if (st.dirty) {
+    scheduleAutoPush(target);
+    return false;
   }
-  if (kanbanAutoSaveTimer !== null) {
-    clearTimeout(kanbanAutoSaveTimer);
-    kanbanAutoSaveTimer = null;
-    hadPendingKanban = true;
+  const data = await callApi('pull', token, getActiveId(target), target, { silent: true });
+  if (data.etag !== null && data.etag !== st.etag) {
+    const validated = cfg.validate(data[cfg.prop]);
+    persistTarget(target, { [cfg.prop]: validated, etag: data.etag, dirty: false });
+    cfg.onAfterPull();
+    return true;
   }
-
-  if ((hadPendingPlan || state.dirty) && state.dirty) {
-    runAutoPush('plan', { keepalive: true });
+  if (data.etag === null && cfg.hasData(st[cfg.prop])) {
+    persistTarget(target, { ...clone(st), dirty: true });
+    scheduleAutoPush(target);
   }
-  if ((hadPendingKanban || kanbanState.dirty) && kanbanState.dirty) {
-    runAutoPush('kanban', { keepalive: true });
-  }
+  return false;
 }
 
 async function autoPullFromCloud(isInitial = false) {
@@ -3533,70 +2555,22 @@ async function autoPullFromCloud(isInitial = false) {
     updateCloudStatusIndicator();
     return;
   }
-  if (!isInitial && Date.now() - lastAutoPullAt < AUTO_PULL_COOLDOWN_MS) {
-    return;
-  }
+  if (!isInitial && Date.now() - lastAutoPullAt < AUTO_PULL_COOLDOWN_MS) return;
 
   lastAutoPullAt = Date.now();
   const token = (localStorage.getItem(TOKEN_KEY) || '').trim();
-  const planId = getActivePlanId();
-  const kanbanId = getActiveKanbanId();
-
   autoSyncInFlight++;
   updateCloudStatusIndicator();
 
   try {
-    let pulledPlan = false;
-    let pulledKanban = false;
-
-    if (state.dirty) {
-      scheduleAutoPush('plan');
-    } else {
-      const planData = await callApiSilent('pull', token, planId, 'plan');
-      if (planData.etag !== null && planData.etag !== state.etag) {
-        const validated = validatePlan(planData.plan);
-        const next = { plan: validated, etag: planData.etag, dirty: false };
-        persist(next);
-        render();
-        renderKanbanBadge();
-        pulledPlan = true;
-      } else if (
-        planData.etag === null &&
-        (state.plan.events.length > 0 || state.plan.subjects.length > 0 || (state.plan.academicYear?.specialDays?.length || 0) > 0)
-      ) {
-        const next = clone(state);
-        next.dirty = true;
-        persist(next);
-        scheduleAutoPush('plan');
-      }
-    }
-
-    if (kanbanState.dirty) {
-      scheduleAutoPush('kanban');
-    } else {
-      const kanbanData = await callApiSilent('pull', token, kanbanId, 'kanban');
-      if (kanbanData.etag !== null && kanbanData.etag !== kanbanState.etag) {
-        const validated = validateKanban(kanbanData.kanban);
-        const next = { kanban: validated, etag: kanbanData.etag, dirty: false };
-        persistKanban(next);
-        renderKanban();
-        pulledKanban = true;
-      } else if (kanbanData.etag === null && kanbanState.kanban.cards.length > 0) {
-        const next = clone(kanbanState);
-        next.dirty = true;
-        persistKanban(next);
-        scheduleAutoPush('kanban');
-      }
-    }
-
+    const pulledPlan = await autoPullTarget('plan', token);
+    const pulledKanban = await autoPullTarget('kanban', token);
     const timeLabel = new Date().toLocaleTimeString('pl-PL');
     cloudSyncState = 'synced';
     cloudSyncDetail = timeLabel;
     if (pulledPlan || pulledKanban) {
-      const updatedParts = [];
-      if (pulledPlan) updatedParts.push('plan zajęć');
-      if (pulledKanban) updatedParts.push('tablicę Kanban');
-      setStatus(`Auto-synchronizacja: pobrano z chmury (${updatedParts.join(' i ')}) · ${timeLabel}.`);
+      const parts = [pulledPlan && 'plan zajęć', pulledKanban && 'tablicę Kanban'].filter(Boolean);
+      setStatus(`Auto-synchronizacja: pobrano z chmury (${parts.join(' i ')}) · ${timeLabel}.`);
     }
   } catch (err) {
     cloudSyncState = 'error';
@@ -3607,126 +2581,49 @@ async function autoPullFromCloud(isInitial = false) {
   }
 }
 
-/** Wysyła żądanie do Workera (/api/plan lub /api/kanban). direction: 'pull' (GET) lub 'push' (PUT). */
-async function callApi(direction, token, planId, target = 'plan', overrideEtag = undefined) {
-  const isKanban = target === 'kanban';
-  const baseUrl = isKanban ? KANBAN_API_URL : API_URL;
-  const url = planId ? `${baseUrl}?id=${encodeURIComponent(planId)}` : baseUrl;
-  const headers = { Authorization: 'Bearer ' + token };
-  const options = { method: 'GET', headers, cache: 'no-store', signal: AbortSignal.timeout(API_TIMEOUT_MS) };
-
-  const currentObj = isKanban ? kanbanState.kanban : state.plan;
-  const currentEtag = isKanban ? kanbanState.etag : state.etag;
-
-  if (direction === 'push') {
-    options.method = 'PUT';
-    options.body = JSON.stringify(currentObj);
-    headers['Content-Type'] = 'application/json';
-    const etagToUse = overrideEtag !== undefined ? overrideEtag : currentEtag;
-    if (etagToUse) headers['If-Match'] = `"${etagToUse}"`;
-    else headers['If-None-Match'] = '*';
-  }
-
-  const response = await fetch(url, options);
-
-  let data;
-  try {
-    data = await response.json();
-  } catch {
-    throw Error('API nie jest dostępne. Uruchom projekt przez npm run dev albo wdróż Worker.');
-  }
-
-  if (direction === 'push' && response.status === 409 && overrideEtag === undefined) {
-    const label = planId || 'domyślny';
-    const resourceName = isKanban ? 'tablicy Kanban' : 'planu';
-    if (
-      confirm(
-        `W chmurze dla ${resourceName} „${label}” znajduje się już inna zapisana wersja. Czy chcesz ją nadpisać swoją obecną wersją lokalną?`,
-      )
-    ) {
-      const remote = await callApi('pull', token, planId, target);
-      return callApi('push', token, planId, target, remote.etag);
-    }
-  }
-
-  if (!response.ok) throw Error(data.error || 'Błąd połączenia.');
-  return data;
-}
-
 async function sync(direction) {
   if (busy) return;
   try {
     const token = localStorage.getItem(TOKEN_KEY);
-    if (!token) {
-      openConnectionDialog();
-      return;
-    }
-    const isKanban = activeView === 'kanban';
-    const target = isKanban ? 'kanban' : 'plan';
-    const activeId = isKanban ? getActiveKanbanId() : getActivePlanId();
-    const fileKey = isKanban ? resolveKanbanKey(activeId) : resolvePlanKey(activeId);
-    const isDirty = isKanban ? kanbanState.dirty : state.dirty;
-    const nounAcc = isKanban ? 'tablicę Kanban' : 'plan';
+    if (!token) { openConnectionDialog(); return; }
 
-    if (
-      direction === 'pull' &&
-      isDirty &&
-      !confirm(
-        `Pobranie zastąpi niezapisane lokalne zmiany (${nounAcc}). Wyeksportuj je najpierw do pliku JSON, jeśli chcesz je zachować. Kontynuować?`,
-      )
-    ) {
+    const target = activeView === 'kanban' ? 'kanban' : 'plan';
+    const cfg = TARGETS[target];
+    const activeId = getActiveId(target);
+    const fileKey = cfg.resolveKey(activeId);
+
+    if (direction === 'pull' && cfg.getState().dirty &&
+      !confirm(`Pobranie zastąpi niezapisane lokalne zmiany (${cfg.nounAcc}). Wyeksportuj je najpierw do pliku JSON, jeśli chcesz je zachować. Kontynuować?`)) {
       return;
     }
 
     busy = true;
     setButtonsDisabled(true);
-    setStatus(
-      direction === 'pull'
-        ? `Pobieranie z chmury: ${fileKey}…`
-        : `Zapisywanie w chmurze: ${fileKey}…`,
-    );
+    setStatus(direction === 'pull' ? `Pobieranie z chmury: ${fileKey}…` : `Zapisywanie w chmurze: ${fileKey}…`);
 
     const data = await callApi(direction, token, activeId, target);
-
-    if (isKanban) {
-      if (kanbanAutoSaveTimer !== null) {
-        clearTimeout(kanbanAutoSaveTimer);
-        kanbanAutoSaveTimer = null;
-      }
-      const next = clone(kanbanState);
-      if (direction === 'pull') next.kanban = validateKanban(data.kanban);
-      next.etag = data.etag;
-      next.dirty = false;
-      persistKanban(next);
-      renderKanban();
-      const timeLabel = new Date().toLocaleTimeString('pl-PL');
-      cloudSyncState = 'synced';
-      cloudSyncDetail = timeLabel;
-      setStatus(`Zsynchronizowano tablicę Kanban (${fileKey}) · ${timeLabel}.`);
-    } else {
-      if (planAutoSaveTimer !== null) {
-        clearTimeout(planAutoSaveTimer);
-        planAutoSaveTimer = null;
-      }
-      const next = clone(state);
-      if (direction === 'pull') next.plan = validatePlan(data.plan);
-      next.etag = data.etag;
-      next.dirty = false;
-      persist(next);
-      render();
-      const timeLabel = new Date().toLocaleTimeString('pl-PL');
-      cloudSyncState = 'synced';
-      cloudSyncDetail = timeLabel;
-      setStatus(`Zsynchronizowano plan zajęć (${fileKey}) · ${timeLabel}.`);
+    if (cfg.getTimer() !== null) {
+      clearTimeout(cfg.getTimer());
+      cfg.setTimer(null);
     }
+
+    const next = clone(cfg.getState());
+    if (direction === 'pull') next[cfg.prop] = cfg.validate(data[cfg.prop]);
+    next.etag = data.etag;
+    next.dirty = false;
+    persistTarget(target, next);
+    cfg.onAfterPull();
+
+    const timeLabel = new Date().toLocaleTimeString('pl-PL');
+    cloudSyncState = 'synced';
+    cloudSyncDetail = timeLabel;
+    setStatus(`Zsynchronizowano ${cfg.label} (${fileKey}) · ${timeLabel}.`);
   } catch (err) {
     cloudSyncState = 'error';
     cloudSyncDetail = err.message;
-    if (err.name === 'TimeoutError') {
-      setStatus('Przekroczono czas połączenia. Dane lokalne pozostały bez zmian.');
-    } else {
-      setStatus(err.message + ' Lokalna kopia pozostaje dostępna.');
-    }
+    setStatus(err.name === 'TimeoutError'
+      ? 'Przekroczono czas połączenia. Dane lokalne pozostały bez zmian.'
+      : err.message + ' Lokalna kopia pozostaje dostępna.');
   } finally {
     busy = false;
     setButtonsDisabled(false);
@@ -3737,12 +2634,11 @@ async function sync(direction) {
 // --- Podpięcie zdarzeń -------------------------------------------------------
 
 function bindEvents() {
+  const closeAnd = (fn) => () => { setMobileMenuOpen(false); fn(); };
+
   $('tabCalendar').onclick = () => setActiveView('calendar');
   $('tabKanban').onclick = () => setActiveView('kanban');
-  $('cloudStatusBadge').onclick = () => {
-    setMobileMenuOpen(false);
-    openConnectionDialog();
-  };
+  $('cloudStatusBadge').onclick = closeAnd(openConnectionDialog);
   $('liveClockBadge').onclick = () => {
     const t = today();
     if (activeView !== 'calendar') setActiveView('calendar');
@@ -3750,36 +2646,24 @@ function bindEvents() {
     showWeek(monday(t));
   };
 
-  $('menuToggle').onclick = () => {
-    const isOpen = $('navPanel').classList.contains('open');
-    setMobileMenuOpen(!isOpen);
-  };
+  $('menuToggle').onclick = () => setMobileMenuOpen(!$('navPanel').classList.contains('open'));
   $('editModeToggle').onclick = () => setEditMode(!editMode);
   $('addEvent').onclick = () => openEventDialog(null, addDays(week, selectedDayIndex));
 
-  // Zdarzenia tablicy Kanban
+  // Kanban
   $('addKanbanCardBtn').onclick = () => openKanbanCardDialog();
-  $('manageKanbanColsBtn').onclick = () => openKanbanColumnsDialog();
-  $('clearKanbanDoneBtn').onclick = () => {
-    setMobileMenuOpen(false);
-    clearKanbanDone();
-  };
-  $('resetKanbanBtn').onclick = () => {
-    setMobileMenuOpen(false);
-    resetKanbanBoard();
-  };
+  $('manageKanbanColsBtn').onclick = closeAnd(openKanbanColumnsDialog);
+  $('clearKanbanDoneBtn').onclick = closeAnd(clearKanbanDone);
+  $('resetKanbanBtn').onclick = closeAnd(resetKanbanBoard);
   $('kanbanFilterSubject').onchange = renderKanban;
   $('kanbanFilterPriority').onchange = renderKanban;
   $('kanbanSearch').oninput = renderKanban;
 
-  $('kanbanCardSubjectSelect').onchange = updateKanbanSubjectSelectFields;
-  $('kanbanCardCategorySelect').onchange = updateKanbanCategorySelectFields;
+  $('kanbanCardSubjectSelect').onchange = () => toggleCustomInput($('kanbanCardSubjectSelect'), $('kanbanCardSubjectCustom'), KANBAN_CUSTOM_SUBJECT, true);
+  $('kanbanCardCategorySelect').onchange = () => toggleCustomInput($('kanbanCardCategorySelect'), $('kanbanCardCategoryCustom'), KANBAN_CUSTOM_CATEGORY, true);
   $('addKanbanCheckItemBtn').onclick = addDraftChecklistItem;
   $('kanbanNewCheckItem').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      addDraftChecklistItem();
-    }
+    if (e.key === 'Enter') { e.preventDefault(); addDraftChecklistItem(); }
   });
   $('kanbanCardForm').onsubmit = saveKanbanCard;
   $('deleteKanbanCardBtn').onclick = deleteKanbanCard;
@@ -3790,52 +2674,35 @@ function bindEvents() {
     if (id) openKanbanCardDialog(id);
   };
 
-  // Przełączanie kolumn Kanban gestem swipe na telefonie
+  // Swipe w kolumnach Kanban na telefonie
   let kanbanTouchX = null;
   let kanbanTouchY = null;
-  const kanbanBoardEl = $('kanbanBoard');
-  kanbanBoardEl.addEventListener(
-    'touchstart',
-    (e) => {
-      if (e.touches.length === 1 && window.innerWidth <= 768) {
-        kanbanTouchX = e.touches[0].clientX;
-        kanbanTouchY = e.touches[0].clientY;
-      }
-    },
-    { passive: true },
-  );
-  kanbanBoardEl.addEventListener(
-    'touchend',
-    (e) => {
-      if (kanbanTouchX === null || !e.changedTouches.length) return;
-      const dx = e.changedTouches[0].clientX - kanbanTouchX;
-      const dy = e.changedTouches[0].clientY - kanbanTouchY;
-      kanbanTouchX = null;
-      kanbanTouchY = null;
-      const totalCols = kanbanState.kanban.columns.length;
-      if (window.innerWidth <= 768 && totalCols > 1 && Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
-        if (dx < 0 && selectedKanbanColIndex < totalCols - 1) {
-          kanbanMobileSlideDir = 'slide-next';
-          selectedKanbanColIndex++;
-          renderKanban();
-        } else if (dx > 0 && selectedKanbanColIndex > 0) {
-          kanbanMobileSlideDir = 'slide-prev';
-          selectedKanbanColIndex--;
-          renderKanban();
-        }
-      }
-    },
-    { passive: true },
-  );
+  $('kanbanBoard').addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1 && window.innerWidth <= 768) {
+      kanbanTouchX = e.touches[0].clientX;
+      kanbanTouchY = e.touches[0].clientY;
+    }
+  }, { passive: true });
+  $('kanbanBoard').addEventListener('touchend', (e) => {
+    if (kanbanTouchX === null || !e.changedTouches.length) return;
+    const dx = e.changedTouches[0].clientX - kanbanTouchX;
+    const dy = e.changedTouches[0].clientY - kanbanTouchY;
+    kanbanTouchX = kanbanTouchY = null;
+    const totalCols = kanbanState.kanban.columns.length;
+    if (window.innerWidth <= 768 && totalCols > 1 && Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      if (dx < 0 && selectedKanbanColIndex < totalCols - 1) { kanbanMobileSlideDir = 'slide-next'; selectedKanbanColIndex++; renderKanban(); }
+      else if (dx > 0 && selectedKanbanColIndex > 0) { kanbanMobileSlideDir = 'slide-prev'; selectedKanbanColIndex--; renderKanban(); }
+    }
+  }, { passive: true });
+
+  // Formularz zajęć, przedmiotów, czyszczenia i struktury roku
   $('subject').onchange = updateSubjectSelectionFields;
-  $('typeSelect').onchange = updateTypeSelectFields;
+  $('typeSelect').onchange = () => toggleCustomInput($('typeSelect'), $('typeCustom'), CUSTOM_TYPE_VALUE, true);
   $('start').onchange = () => {
     const startVal = $('start').value;
     if (!startVal) return;
-    const isCustom = $('subject').value === CUSTOM_SUBJECT_VALUE;
-    const endVal = $('end').value;
-    if (!endVal || endVal <= startVal) {
-      const duration = isCustom ? 60 : 90;
+    if (!$('end').value || $('end').value <= startVal) {
+      const duration = $('subject').value === CUSTOM_SUBJECT_VALUE ? 60 : 90;
       $('end').value = fromMinutes(Math.min(23 * 60 + 55, toMinutes(startVal) + duration));
     }
   };
@@ -3848,7 +2715,6 @@ function bindEvents() {
     $('eventDetailsDialog').close();
     if (id) openEventDialog(id);
   };
-
   $('detailsEditSubjectBtn').onclick = () => {
     const ev = state.plan.events.find((e) => e.id === detailsEventId);
     const subj = state.plan.subjects.find((s) => s.id === ev?.subjectId);
@@ -3856,25 +2722,16 @@ function bindEvents() {
     openSubjectDialog('', subj || null);
   };
 
-  $('subjects').onclick = () => {
-    setMobileMenuOpen(false);
-    openSubjectDialog();
-  };
+  $('subjects').onclick = closeAnd(() => openSubjectDialog());
   $('subjectForm').onsubmit = saveSubject;
   $('newSubject').onclick = resetSubjectForm;
 
-  $('bulkManageBtn').onclick = () => {
-    setMobileMenuOpen(false);
-    openBulkDialog();
-  };
+  $('bulkManageBtn').onclick = closeAnd(openBulkDialog);
   $('reconcileBtn').onclick = runReconcile;
   $('clearEventsBtn').onclick = clearAllEvents;
   $('clearAllBtn').onclick = clearEntireCalendar;
 
-  $('academicYearBtn').onclick = () => {
-    setMobileMenuOpen(false);
-    openAcademicYearDialog();
-  };
+  $('academicYearBtn').onclick = closeAnd(openAcademicYearDialog);
   $('academicYearForm').onsubmit = saveSpecialDay;
   $('specialDayType').onchange = updateSpecialDayTypeFields;
   $('rectorFullDay').onchange = updateSpecialDayTypeFields;
@@ -3882,15 +2739,13 @@ function bindEvents() {
   for (const button of document.querySelectorAll('[data-close]')) {
     button.onclick = () => button.closest('dialog').close();
   }
-
   for (const dialog of document.querySelectorAll('dialog')) {
     dialog.addEventListener('close', syncModalScrollLock);
     dialog.addEventListener('cancel', () => setTimeout(syncModalScrollLock, 0));
-    dialog.addEventListener('click', (e) => {
-      if (e.target === dialog) dialog.close();
-    });
+    dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.close(); });
   }
 
+  // Nawigacja tygodniowa i swipe na kalendarzu
   $('prev').onclick = () => showWeek(addDays(week, -7));
   $('next').onclick = () => showWeek(addDays(week, 7));
   $('today').onclick = () => {
@@ -3900,13 +2755,9 @@ function bindEvents() {
   };
   $('jump').onchange = () => {
     const val = $('jump').value;
-    if (val) {
-      selectedDayIndex = weekdayIndex(val);
-      showWeek(monday(val));
-    }
+    if (val) { selectedDayIndex = weekdayIndex(val); showWeek(monday(val)); }
   };
 
-  // Przełączanie dni gestem przesunięcia palcem (swipe lewo/prawo) na telefonie
   let touchStartX = null;
   let touchStartY = null;
   let isHorizontalSwipe = null;
@@ -3914,140 +2765,79 @@ function bindEvents() {
 
   const resetActiveDayDrag = () => {
     const activeDay = calendarEl.querySelector('.day.mobile-active');
-    if (activeDay) {
-      activeDay.style.transform = '';
-      activeDay.style.opacity = '';
-      activeDay.style.transition = '';
-    }
+    if (activeDay) activeDay.style.transform = activeDay.style.opacity = activeDay.style.transition = '';
   };
 
-  calendarEl.addEventListener(
-    'touchstart',
-    (e) => {
-      if (e.touches.length === 1 && window.innerWidth <= 768) {
-        touchStartX = e.touches[0].clientX;
-        touchStartY = e.touches[0].clientY;
-        isHorizontalSwipe = null;
+  calendarEl.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1 && window.innerWidth <= 768) {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      isHorizontalSwipe = null;
+    }
+  }, { passive: true });
+  calendarEl.addEventListener('touchmove', (e) => {
+    if (touchStartX === null || e.touches.length !== 1 || window.innerWidth > 768) return;
+    const dx = e.touches[0].clientX - touchStartX;
+    const dy = e.touches[0].clientY - touchStartY;
+    if (isHorizontalSwipe === null && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) isHorizontalSwipe = Math.abs(dx) > Math.abs(dy) * 1.3;
+    if (isHorizontalSwipe) {
+      const activeDay = calendarEl.querySelector('.day.mobile-active');
+      if (activeDay) {
+        const dampedX = Math.max(-90, Math.min(90, dx * 0.38));
+        activeDay.style.transition = 'none';
+        activeDay.style.transform = `translate3d(${dampedX.toFixed(1)}px, 0, 0)`;
+        activeDay.style.opacity = String((1 - Math.min(1, Math.abs(dx) / 220) * 0.25).toFixed(2));
       }
-    },
-    { passive: true },
-  );
-  calendarEl.addEventListener(
-    'touchmove',
-    (e) => {
-      if (touchStartX === null || e.touches.length !== 1 || window.innerWidth > 768) return;
-      const dx = e.touches[0].clientX - touchStartX;
-      const dy = e.touches[0].clientY - touchStartY;
-
-      if (isHorizontalSwipe === null && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
-        isHorizontalSwipe = Math.abs(dx) > Math.abs(dy) * 1.3;
-      }
-
-      if (isHorizontalSwipe) {
-        const activeDay = calendarEl.querySelector('.day.mobile-active');
-        if (activeDay) {
-          const dampedX = Math.max(-90, Math.min(90, dx * 0.38));
-          const progress = Math.min(1, Math.abs(dx) / 220);
-          activeDay.style.transition = 'none';
-          activeDay.style.transform = `translate3d(${dampedX.toFixed(1)}px, 0, 0)`;
-          activeDay.style.opacity = String((1 - progress * 0.25).toFixed(2));
-        }
-      }
-    },
-    { passive: true },
-  );
+    }
+  }, { passive: true });
   calendarEl.addEventListener('touchcancel', () => {
-    touchStartX = null;
-    touchStartY = null;
-    isHorizontalSwipe = null;
+    touchStartX = touchStartY = isHorizontalSwipe = null;
     resetActiveDayDrag();
   });
-  calendarEl.addEventListener(
-    'touchend',
-    (e) => {
-      if (touchStartX === null || !e.changedTouches.length) return;
-      const dx = e.changedTouches[0].clientX - touchStartX;
-      const dy = e.changedTouches[0].clientY - touchStartY;
-      touchStartX = null;
-      touchStartY = null;
-      isHorizontalSwipe = null;
+  calendarEl.addEventListener('touchend', (e) => {
+    if (touchStartX === null || !e.changedTouches.length) return;
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    const dy = e.changedTouches[0].clientY - touchStartY;
+    touchStartX = touchStartY = isHorizontalSwipe = null;
 
-      if (window.innerWidth <= 768 && Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
-        if (dx < 0) {
-          // Przesunięcie w lewo → następny dzień
-          mobileSlideDir = 'slide-next';
-          if (selectedDayIndex < 6) {
-            selectedDayIndex++;
-            render();
-          } else {
-            selectedDayIndex = 0;
-            showWeek(addDays(week, 7));
-          }
-        } else {
-          // Przesunięcie w prawo → poprzedni dzień
-          mobileSlideDir = 'slide-prev';
-          if (selectedDayIndex > 0) {
-            selectedDayIndex--;
-            render();
-          } else {
-            selectedDayIndex = 6;
-            showWeek(addDays(week, -7));
-          }
-        }
+    if (window.innerWidth <= 768 && Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      if (dx < 0) {
+        mobileSlideDir = 'slide-next';
+        if (selectedDayIndex < 6) { selectedDayIndex++; render(); }
+        else { selectedDayIndex = 0; showWeek(addDays(week, 7)); }
       } else {
-        resetActiveDayDrag();
+        mobileSlideDir = 'slide-prev';
+        if (selectedDayIndex > 0) { selectedDayIndex--; render(); }
+        else { selectedDayIndex = 6; showWeek(addDays(week, -7)); }
       }
-    },
-    { passive: true },
-  );
+    } else {
+      resetActiveDayDrag();
+    }
+  }, { passive: true });
 
-  // Odświeżanie na żywo zegara i paska aktualnej godziny + auto-synchronizacja w tle
+  // Zegar, widoczność karty, auto-sync i pliki
   setInterval(updateLiveTimeIndicator, 10_000);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      flushPendingAutoPushKeepalive();
-    } else {
-      updateLiveTimeIndicator();
-      autoPullFromCloud(false);
-    }
+    if (document.hidden) flushPendingAutoPushKeepalive();
+    else { updateLiveTimeIndicator(); autoPullFromCloud(false); }
   });
-  window.addEventListener('pagehide', () => {
-    flushPendingAutoPushKeepalive();
-  });
+  window.addEventListener('pagehide', flushPendingAutoPushKeepalive);
   window.addEventListener('beforeunload', (e) => {
-    if (planAutoSaveTimer !== null || kanbanAutoSaveTimer !== null || state.dirty || kanbanState.dirty) {
-      flushPendingAutoPushKeepalive();
-    }
-    if (autoSyncInFlight > 0) {
-      e.preventDefault();
-      e.returnValue = '';
-    }
+    if (planAutoSaveTimer !== null || kanbanAutoSaveTimer !== null || state.dirty || kanbanState.dirty) flushPendingAutoPushKeepalive();
+    if (autoSyncInFlight > 0) { e.preventDefault(); e.returnValue = ''; }
   });
-  window.addEventListener('resize', () => {
-    requestAnimationFrame(refreshSpecialDayMarquees);
-  });
+  window.addEventListener('resize', () => requestAnimationFrame(refreshSpecialDayMarquees));
 
-  $('export').onclick = () => {
-    setMobileMenuOpen(false);
-    exportActiveView();
-  };
-  $('importButton').onclick = () => {
-    setMobileMenuOpen(false);
-    $('import').click();
-  };
+  $('export').onclick = closeAnd(exportActiveView);
+  $('importButton').onclick = closeAnd(() => $('import').click());
   $('import').onchange = importActiveView;
-
-  $('connection').onclick = () => {
-    setMobileMenuOpen(false);
-    openConnectionDialog();
-  };
+  $('connection').onclick = closeAnd(openConnectionDialog);
   $('planId').oninput = updateConnectionPreviews;
   $('kanbanId').oninput = updateConnectionPreviews;
   $('connectionForm').onsubmit = saveConnection;
   $('pull').onclick = () => sync('pull');
   $('push').onclick = () => sync('push');
 
-  // Inna karta tej samej przeglądarki zmieniła dane — blokujemy edycję, żeby się nie nadpisywać.
   window.addEventListener('storage', (e) => {
     if (e.key === STORAGE_KEY || e.key === KANBAN_STORAGE_KEY || e.key === null) {
       storageBlocked = true;

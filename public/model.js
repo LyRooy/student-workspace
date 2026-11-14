@@ -1,5 +1,4 @@
-// Wspólny model danych planu — używany zarówno w przeglądarce (app.js),
-// jak i w Workerze (worker.js), dzięki czemu walidacja jest identyczna po obu stronach.
+// Wspólny model danych planu i tablicy Kanban — używany w przeglądarce (app.js) oraz w Workerze (worker.js).
 
 export const SCHEMA_VERSION = 1;
 
@@ -26,39 +25,30 @@ export const LIMITS = {
 
 const MIN_DATE = '2000-01-01';
 const MAX_DATE = '2100-12-31';
-
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 const ID_PATTERN = /^[a-zA-Z0-9_-]{1,80}$/;
 export const PLAN_ID_PATTERN = /^[a-zA-Z0-9_-]{1,60}$/;
 const COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const DAY_OF_WEEK_PATTERN = /^(mon|tue|wed|thu|fri|sat|sun)$/;
+const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const DAY_MS = 86_400_000;
+const KANBAN_PRIORITIES = new Set(['low', 'medium', 'high']);
 
-/**
- * Wyznacza klucz obiektu w R2 na podstawie opcjonalnej nazwy/ID planu.
- * Puste ID lub 'default' wskazuje na domyślny 'plan.json' (pełna kompatybilność wsteczna).
- */
-export function resolvePlanKey(rawId) {
+function resolveStorageKey(rawId, defaultFile, folder) {
   const cleaned = (rawId ?? '').trim();
-  if (!cleaned || cleaned.toLowerCase() === 'default') return 'plan.json';
+  if (!cleaned || cleaned.toLowerCase() === 'default') return defaultFile;
   if (!PLAN_ID_PATTERN.test(cleaned)) {
     throw Error('Nazwa planu może zawierać tylko litery (bez polskich znaków), cyfry, myślnik i podkreślenie (maks. 60 znaków).');
   }
-  return `plans/${cleaned.toLowerCase()}.json`;
+  return `${folder}/${cleaned.toLowerCase()}.json`;
 }
 
-/**
- * Wyznacza klucz obiektu tablicy Kanban w R2 na podstawie opcjonalnej nazwy/ID.
- * Puste ID lub 'default' wskazuje na osobny plik 'kanban.json'.
- */
-export function resolveKanbanKey(rawId) {
-  const cleaned = (rawId ?? '').trim();
-  if (!cleaned || cleaned.toLowerCase() === 'default') return 'kanban.json';
-  if (!PLAN_ID_PATTERN.test(cleaned)) {
-    throw Error('Nazwa planu może zawierać tylko litery (bez polskich znaków), cyfry, myślnik i podkreślenie (maks. 60 znaków).');
-  }
-  return `kanban/${cleaned.toLowerCase()}.json`;
-}
+/** Wyznacza klucz obiektu planu w R2 na podstawie opcjonalnej nazwy/ID. */
+export const resolvePlanKey = (rawId) => resolveStorageKey(rawId, 'plan.json', 'plans');
+
+/** Wyznacza klucz obiektu tablicy Kanban w R2 na podstawie opcjonalnej nazwy/ID. */
+export const resolveKanbanKey = (rawId) => resolveStorageKey(rawId, 'kanban.json', 'kanban');
 
 export const DEFAULT_KANBAN_COLUMNS = [
   { id: 'todo', title: 'Do zrobienia' },
@@ -76,21 +66,17 @@ export const emptyPlan = () => ({
   schemaVersion: SCHEMA_VERSION,
   subjects: [],
   events: [],
-  academicYear: {
-    specialDays: [], // { date: 'YYYY-MM-DD', type: 'holiday'|'swap', label: '...', targetDay?: 'mon'|'tue'|... }
-  },
+  academicYear: { specialDays: [] },
 });
 
 /** Sprawdza, czy tekst to istniejąca data w formacie RRRR-MM-DD (np. odrzuca 2026-02-31). */
 export function validDate(value) {
-  if (typeof value !== 'string' || !DATE_PATTERN.test(value)) return false;
-  if (value < MIN_DATE || value > MAX_DATE) return false;
-
+  if (typeof value !== 'string' || !DATE_PATTERN.test(value) || value < MIN_DATE || value > MAX_DATE) return false;
   const parsed = new Date(value + 'T00:00:00Z');
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-/** Dodaje `days` dni do daty RRRR-MM-DD. Liczy w południe UTC, więc zmiana czasu nie przesuwa dnia. */
+/** Dodaje `days` dni do daty RRRR-MM-DD w południe UTC (bez wpływu zmiany czasu). */
 export function addDays(date, days) {
   const d = new Date(date + 'T12:00:00Z');
   d.setUTCDate(d.getUTCDate() + days);
@@ -99,18 +85,12 @@ export function addDays(date, days) {
 
 /** Zwraca poniedziałek tygodnia, do którego należy podana data. */
 export function monday(date) {
-  const weekday = new Date(date + 'T12:00:00Z').getUTCDay(); // 0 = niedziela
-  const daysSinceMonday = (weekday + 6) % 7;
-  return addDays(date, -daysSinceMonday);
+  const weekday = new Date(date + 'T12:00:00Z').getUTCDay();
+  return addDays(date, -((weekday + 6) % 7));
 }
-
-const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
-const DAY_MS = 86_400_000;
 
 /** Zwraca klucz dnia tygodnia ('mon'..'sun') dla podanej daty. */
-export function getDayOfWeekKey(date) {
-  return WEEKDAY_KEYS[new Date(date + 'T12:00:00Z').getUTCDay()];
-}
+export const getDayOfWeekKey = (date) => WEEKDAY_KEYS[new Date(date + 'T12:00:00Z').getUTCDay()];
 
 /** Sprawdza, czy podana data przypada w weekend (sobota lub niedziela). */
 export function isWeekend(date) {
@@ -118,83 +98,43 @@ export function isWeekend(date) {
   return key === 'sat' || key === 'sun';
 }
 
-/** Liczba pełnych tygodni między tygodniami, do których należą daty `a` i `b`. */
-function weeksBetween(a, b) {
-  return Math.round((Date.parse(monday(b)) - Date.parse(monday(a))) / (7 * DAY_MS));
-}
-
-/** Mapa data → wpis dnia specjalnego ze struktury roku. */
-function specialDayMap(academicYear) {
-  return new Map((academicYear?.specialDays || []).map((sd) => [sd.date, sd]));
-}
+const weeksBetween = (a, b) => Math.round((Date.parse(monday(b)) - Date.parse(monday(a))) / (7 * DAY_MS));
+const specialDayMap = (academicYear) => new Map((academicYear?.specialDays || []).map((sd) => [sd.date, sd]));
 
 /**
  * Który dzień planu obowiązuje w danej dacie według struktury roku:
- *  - null       → dzień wolny (święto, przerwa lub domyślnie weekend bez zamiany planu),
- *  - targetDay  → dzień z zamianą planu (np. wtorek realizowany wg planu ze środy → 'wed'),
- *  - inaczej    → zwykły dzień tygodnia tej daty.
+ * null (dzień wolny/sesja/weekend), targetDay (zamiana planu) lub zwykły dzień tygodnia.
  */
 export function effectiveDayKey(date, academicYear, map = specialDayMap(academicYear)) {
   const special = map.get(date);
   if (special?.type === 'holiday' || special?.type === 'session') return null;
   if (special?.type === 'swap') return special.targetDay;
-  if (isWeekend(date)) return null;
-  return getDayOfWeekKey(date);
+  return isWeekend(date) ? null : getDayOfWeekKey(date);
 }
 
-/** Zwraca wpis dnia wolnego dla daty (w tym domyślnie każdy weekend, o ile nie ma zamiany planu ani sesji) albo null. */
+/** Zwraca wpis dnia wolnego dla daty (w tym weekendy bez zamiany/sesji) albo null. */
 export function holidayFor(date, academicYear) {
   const special = specialDayMap(academicYear).get(date);
   if (special?.type === 'holiday') return special;
   if (special?.type === 'swap' || special?.type === 'session') return null;
-  if (isWeekend(date)) return { date, type: 'holiday', label: 'Weekend', isWeekend: true };
-  return null;
+  return isWeekend(date) ? { date, type: 'holiday', label: 'Weekend', isWeekend: true } : null;
 }
 
 function holidayError(date, holiday) {
   const reason = holiday.label ? ` (${holiday.label})` : '';
-  return Error(
-    `${date} to dzień wolny${reason}. W dni wolne i weekendy można dodawać tylko wydarzenia własne (poza przedmiotem).`,
-  );
+  return Error(`${date} to dzień wolny${reason}. W dni wolne i weekendy można dodawać tylko wydarzenia własne (poza przedmiotem).`);
 }
 
-/**
- * Generuje listę dat spotkań.
- *
- * Gdy `applyAcademicYear` jest włączone (i nie jest to wydarzenie własne `isCustom`):
- *  - dni wolne oraz weekendy są pomijane, a pojedynczego terminu przedmiotu nie da się w nich dodać,
- *  - w dniu z zamianą planu (np. środa wg planu z piątku) zajęcia środowe nie odbywają się,
- *  - zajęcia „przeskakują” na dzień, który realizuje plan ich dnia tygodnia
- *    (np. wtorek wg planu ze środy dostaje zajęcia środowe) — także przy powtarzaniu co 2 tygodnie.
- *
- * @param {string} start  pierwsza data (RRRR-MM-DD) — wyznacza dzień tygodnia serii
- * @param {string} until  ostatnia możliwa data serii (dla weekly/biweekly)
- * @param {'once'|'weekly'|'biweekly'|'manual'} mode  tryb powtarzania
- * @param {string} manual lista dat oddzielonych przecinkami/spacjami (dla trybu manual)
- * @param {object} [academicYear] struktura roku z tablicą specialDays
- * @param {boolean} [applyAcademicYear=true] czy stosować reguły dni wolnych i zamian
- * @param {boolean} [isCustom=false] czy to wydarzenie własne (off-top), które można dodać w weekend/dzień wolny
- */
-export function datesFor(
-  start,
-  until,
-  mode,
-  manual = '',
-  academicYear = null,
-  applyAcademicYear = true,
-  isCustom = false,
-) {
+/** Generuje listę dat spotkań dla trybów 'once', 'weekly', 'biweekly' i 'manual'. */
+export function datesFor(start, until, mode, manual = '', academicYear = null, applyAcademicYear = true, isCustom = false) {
   if (!validDate(start)) throw Error('Wybierz prawidłową datę.');
-
   const enforceHolidays = applyAcademicYear && !isCustom;
   const year = enforceHolidays ? academicYear : null;
   const map = specialDayMap(year);
 
   if (mode === 'once') {
-    if (enforceHolidays) {
-      const holiday = holidayFor(start, year);
-      if (holiday) throw holidayError(start, holiday);
-    }
+    const holiday = enforceHolidays ? holidayFor(start, year) : null;
+    if (holiday) throw holidayError(start, holiday);
     return [start];
   }
 
@@ -216,32 +156,18 @@ export function datesFor(
   const everyWeeks = mode === 'weekly' ? 1 : 2;
   const result = [];
 
-  // Sprawdzamy każdy dzień zakresu: zajęcia odbywają się tam, gdzie obowiązuje plan dnia serii.
   for (let date = start; date <= until; date = addDays(date, 1)) {
     const dayKey = enforceHolidays ? effectiveDayKey(date, year, map) : getDayOfWeekKey(date);
-    if (dayKey !== seriesDay) continue;
-    if (weeksBetween(start, date) % everyWeeks !== 0) continue;
-
-    if (result.length >= LIMITS.eventsPerSeries) {
-      throw Error(`Maksymalnie ${LIMITS.eventsPerSeries} spotkań w jednej serii.`);
-    }
+    if (dayKey !== seriesDay || weeksBetween(start, date) % everyWeeks !== 0) continue;
+    if (result.length >= LIMITS.eventsPerSeries) throw Error(`Maksymalnie ${LIMITS.eventsPerSeries} spotkań w jednej serii.`);
     result.push(date);
   }
 
-  if (!result.length) {
-    throw Error('W wybranym okresie nie ma żadnego terminu — wszystkie przypadają na dni wolne.');
-  }
+  if (!result.length) throw Error('W wybranym okresie nie ma żadnego terminu — wszystkie przypadają na dni wolne.');
   return result;
 }
 
-/**
- * Dopasowuje już istniejące zajęcia do struktury roku (np. gdy dni wolne dodano po utworzeniu planu).
- * Dotyczy tylko serii powtarzalnych (min. 2 spotkania) — pojedyncze terminy pozostają bez zmian.
- *  - usuwa spotkania serii z dni wolnych i z dni realizujących plan innego dnia tygodnia,
- *  - dodaje spotkania w dniach, które realizują plan dnia tygodnia danej serii.
- *
- * @returns {{ events: object[], removed: number, added: number }} nowa lista zajęć i liczba zmian
- */
+/** Dopasowuje istniejące serie powtarzalne (min. 2 spotkania) do zaktualizowanej struktury roku. */
 export function reconcileWithAcademicYear(plan, makeId) {
   const map = specialDayMap(plan.academicYear);
   const series = new Map();
@@ -257,9 +183,9 @@ export function reconcileWithAcademicYear(plan, makeId) {
     if (events.length < 2 || !events[0].subjectId) continue;
     events.sort((a, b) => a.date.localeCompare(b.date));
 
-    // Dzień tygodnia serii = najczęstszy dzień wśród spotkań poza dniami wolnymi/zamianami.
     const regular = events.filter((e) => !map.has(e.date) || map.get(e.date)?.type === 'rector');
     if (!regular.length) continue;
+
     const counts = {};
     for (const e of regular) {
       const key = getDayOfWeekKey(e.date);
@@ -268,23 +194,19 @@ export function reconcileWithAcademicYear(plan, makeId) {
     const seriesDay = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
     const sameDay = regular.filter((e) => getDayOfWeekKey(e.date) === seriesDay);
     const anchor = sameDay[0].date;
-    const everyWeeks = sameDay.every((e) => weeksBetween(anchor, e.date) % 2 === 0) && sameDay.length > 1 ? 2 : 1;
+    const everyWeeks = sameDay.length > 1 && sameDay.every((e) => weeksBetween(anchor, e.date) % 2 === 0) ? 2 : 1;
 
-    // 1. Usuń spotkania z dni wolnych / dni z planem innego dnia.
     for (const e of events) {
       if (map.has(e.date) && effectiveDayKey(e.date, null, map) !== seriesDay) removeIds.add(e.id);
     }
 
-    // 2. Dodaj spotkania w dniach realizujących plan dnia tej serii.
     const first = events[0].date;
     const last = events[events.length - 1].date;
     const taken = new Set(events.map((e) => e.date));
     for (const [date, sd] of map) {
       if (sd.type !== 'swap' || sd.targetDay !== seriesDay) continue;
-      if (date < first || date > last || taken.has(date)) continue;
-      if (weeksBetween(anchor, date) % everyWeeks !== 0) continue;
+      if (date < first || date > last || taken.has(date) || weeksBetween(anchor, date) % everyWeeks !== 0) continue;
 
-      // Wzorzec: najbliższe w czasie zwykłe spotkanie tej serii (godziny, sala, prowadzący).
       const template = sameDay.reduce((best, e) =>
         Math.abs(Date.parse(e.date) - Date.parse(date)) < Math.abs(Date.parse(best.date) - Date.parse(date)) ? e : best,
       );
@@ -299,68 +221,50 @@ export function reconcileWithAcademicYear(plan, makeId) {
   };
 }
 
-// --- Walidacja całego planu ---------------------------------------------------
+// --- Walidacja ----------------------------------------------------------------
 
 const isText = (value, maxLength) => typeof value === 'string' && value.length <= maxLength;
 const isNonEmptyText = (value, maxLength) => isText(value, maxLength) && value.trim() !== '';
 const isId = (value) => typeof value === 'string' && ID_PATTERN.test(value);
 const isTime = (value) => typeof value === 'string' && TIME_PATTERN.test(value);
+const isColor = (value) => typeof value === 'string' && COLOR_PATTERN.test(value);
 
-function isValidSubject(subject, knownIds) {
-  return (
-    !!subject &&
-    isId(subject.id) &&
-    !knownIds.has(subject.id) &&
-    isNonEmptyText(subject.name, LIMITS.subjectName) &&
-    (subject.color === undefined ||
-      (typeof subject.color === 'string' && COLOR_PATTERN.test(subject.color))) &&
-    (subject.details === undefined || isText(subject.details, LIMITS.subjectDetails))
-  );
+function validateUniqueCollection(items, validator, errorMessage, ...args) {
+  const ids = new Set();
+  for (const item of items) {
+    if (!validator(item, ids, ...args)) throw Error(errorMessage);
+    ids.add(item.id);
+  }
+  return ids;
 }
 
-function isValidEvent(event, knownIds, subjectIds) {
-  if (!event || !isId(event.id) || knownIds.has(event.id) || !isId(event.seriesId)) {
-    return false;
-  }
+const isValidSubject = (s, knownIds) =>
+  !!s && isId(s.id) && !knownIds.has(s.id) && isNonEmptyText(s.name, LIMITS.subjectName) &&
+  (s.color === undefined || isColor(s.color)) && (s.details === undefined || isText(s.details, LIMITS.subjectDetails));
 
-  const hasSubject = subjectIds.has(event.subjectId);
-  const isCustomEvent =
-    (event.subjectId === null || event.subjectId === '') &&
-    isNonEmptyText(event.customTitle, LIMITS.subjectName);
-
-  if (!hasSubject && !isCustomEvent) return false;
-
-  const validCustomFields =
-    (event.customTitle === undefined || isText(event.customTitle, LIMITS.subjectName)) &&
-    (event.customColor === undefined ||
-      (typeof event.customColor === 'string' && COLOR_PATTERN.test(event.customColor)));
-
+function isValidEvent(e, knownIds, subjectIds) {
+  if (!e || !isId(e.id) || knownIds.has(e.id) || !isId(e.seriesId)) return false;
+  const hasSubject = subjectIds.has(e.subjectId);
+  const isCustom = (e.subjectId === null || e.subjectId === '') && isNonEmptyText(e.customTitle, LIMITS.subjectName);
+  if (!hasSubject && !isCustom) return false;
   return (
-    validCustomFields &&
-    isNonEmptyText(event.type, LIMITS.type) &&
-    validDate(event.date) &&
-    isTime(event.start) &&
-    isTime(event.end) &&
-    event.end > event.start &&
-    isText(event.room, LIMITS.room) &&
-    isText(event.teacher, LIMITS.teacher) &&
-    isText(event.notes, LIMITS.notes) &&
-    (event.remote === undefined || typeof event.remote === 'boolean')
+    (e.customTitle === undefined || isText(e.customTitle, LIMITS.subjectName)) &&
+    (e.customColor === undefined || isColor(e.customColor)) &&
+    isNonEmptyText(e.type, LIMITS.type) && validDate(e.date) &&
+    isTime(e.start) && isTime(e.end) && e.end > e.start &&
+    isText(e.room, LIMITS.room) && isText(e.teacher, LIMITS.teacher) && isText(e.notes, LIMITS.notes) &&
+    (e.remote === undefined || typeof e.remote === 'boolean')
   );
 }
 
 function isValidSpecialDay(sd, knownDates) {
   if (!sd || !validDate(sd.date) || knownDates.has(sd.date)) return false;
-  if (!['holiday', 'swap', 'rector', 'session'].includes(sd.type)) return false;
-  if (!isText(sd.label, LIMITS.dayLabel)) return false;
-  if (sd.type === 'swap') {
-    if (!sd.targetDay || !DAY_OF_WEEK_PATTERN.test(sd.targetDay)) return false;
-  }
+  if (!['holiday', 'swap', 'rector', 'session'].includes(sd.type) || !isText(sd.label, LIMITS.dayLabel)) return false;
+  if (sd.type === 'swap' && (!sd.targetDay || !DAY_OF_WEEK_PATTERN.test(sd.targetDay))) return false;
   if (sd.type === 'rector') {
     const hasStart = sd.start !== undefined && sd.start !== '';
     const hasEnd = sd.end !== undefined && sd.end !== '';
-    if (hasStart !== hasEnd) return false;
-    if (hasStart && (!isTime(sd.start) || !isTime(sd.end) || sd.end <= sd.start)) return false;
+    if (hasStart !== hasEnd || (hasStart && (!isTime(sd.start) || !isTime(sd.end) || sd.end <= sd.start))) return false;
   }
   return true;
 }
@@ -368,17 +272,13 @@ function isValidSpecialDay(sd, knownDates) {
 /** Rzuca błąd, jeśli plan ma nieprawidłową strukturę. Zwraca ten sam obiekt. */
 export function validatePlan(plan) {
   if (
-    !plan ||
-    plan.schemaVersion !== SCHEMA_VERSION ||
-    !Array.isArray(plan.subjects) ||
-    !Array.isArray(plan.events) ||
-    plan.subjects.length > LIMITS.subjects ||
-    plan.events.length > LIMITS.events
+    !plan || plan.schemaVersion !== SCHEMA_VERSION ||
+    !Array.isArray(plan.subjects) || !Array.isArray(plan.events) ||
+    plan.subjects.length > LIMITS.subjects || plan.events.length > LIMITS.events
   ) {
     throw Error(`Nieprawidłowy format planu (schemaVersion: ${SCHEMA_VERSION}).`);
   }
 
-  // Sprawdzenie academicYear (opcjonalne wstecznie dla starszych planów, inicjalizowane jeśli brak)
   if (plan.academicYear !== undefined) {
     if (typeof plan.academicYear !== 'object' || plan.academicYear === null || !Array.isArray(plan.academicYear.specialDays)) {
       throw Error('Nieprawidłowy format struktury roku akademickiego.');
@@ -388,109 +288,57 @@ export function validatePlan(plan) {
     }
     const specialDates = new Set();
     for (const sd of plan.academicYear.specialDays) {
-      if (!isValidSpecialDay(sd, specialDates)) {
-        throw Error('Nieprawidłowy wpis dnia specjalnego w strukturze roku.');
-      }
+      if (!isValidSpecialDay(sd, specialDates)) throw Error('Nieprawidłowy wpis dnia specjalnego w strukturze roku.');
       specialDates.add(sd.date);
     }
   } else {
     plan.academicYear = { specialDays: [] };
   }
 
-  const subjectIds = new Set();
-  for (const subject of plan.subjects) {
-    if (!isValidSubject(subject, subjectIds)) throw Error('Nieprawidłowy przedmiot.');
-    subjectIds.add(subject.id);
-  }
-
-  const eventIds = new Set();
-  for (const event of plan.events) {
-    if (!isValidEvent(event, eventIds, subjectIds)) {
-      throw Error('Nieprawidłowy termin zajęć lub brak przedmiotu.');
-    }
-    eventIds.add(event.id);
-  }
-
+  const subjectIds = validateUniqueCollection(plan.subjects, isValidSubject, 'Nieprawidłowy przedmiot.');
+  validateUniqueCollection(plan.events, isValidEvent, 'Nieprawidłowy termin zajęć lub brak przedmiotu.', subjectIds);
   return plan;
 }
 
-// --- Walidacja tablicy Kanban (osobny plik JSON) -----------------------------
+const isValidKanbanColumn = (col, knownColIds) =>
+  !!col && isId(col.id) && !knownColIds.has(col.id) && isNonEmptyText(col.title, LIMITS.kanbanColumnTitle);
 
-const KANBAN_PRIORITIES = new Set(['low', 'medium', 'high']);
-
-function isValidKanbanColumn(col, knownColIds) {
-  return (
-    !!col &&
-    isId(col.id) &&
-    !knownColIds.has(col.id) &&
-    isNonEmptyText(col.title, LIMITS.kanbanColumnTitle)
-  );
-}
-
-function isValidChecklistItem(item, knownItemIds) {
-  return (
-    !!item &&
-    isId(item.id) &&
-    !knownItemIds.has(item.id) &&
-    isNonEmptyText(item.text, LIMITS.kanbanChecklistText) &&
-    typeof item.done === 'boolean'
-  );
-}
+const isValidChecklistItem = (item, knownItemIds) =>
+  !!item && isId(item.id) && !knownItemIds.has(item.id) &&
+  isNonEmptyText(item.text, LIMITS.kanbanChecklistText) && typeof item.done === 'boolean';
 
 function isValidKanbanCard(card, knownCardIds, columnIds) {
-  if (!card || !isId(card.id) || knownCardIds.has(card.id)) return false;
-  if (!columnIds.has(card.columnId)) return false;
-  if (!isNonEmptyText(card.title, LIMITS.kanbanCardTitle)) return false;
-  if (card.description !== undefined && !isText(card.description, LIMITS.kanbanCardDesc)) return false;
-  if (card.subjectName !== undefined && !isText(card.subjectName, LIMITS.subjectName)) return false;
-  if (card.category !== undefined && !isText(card.category, LIMITS.type)) return false;
-  if (!KANBAN_PRIORITIES.has(card.priority)) return false;
-  if (card.dueDate !== undefined && card.dueDate !== '' && !validDate(card.dueDate)) return false;
-  if (typeof card.order !== 'number' || !Number.isFinite(card.order)) return false;
-
-  if (card.checklist !== undefined) {
-    if (!Array.isArray(card.checklist) || card.checklist.length > LIMITS.kanbanChecklistItems) {
-      return false;
-    }
-    const itemIds = new Set();
-    for (const item of card.checklist) {
-      if (!isValidChecklistItem(item, itemIds)) return false;
-      itemIds.add(item.id);
-    }
+  if (
+    !card || !isId(card.id) || knownCardIds.has(card.id) || !columnIds.has(card.columnId) ||
+    !isNonEmptyText(card.title, LIMITS.kanbanCardTitle) ||
+    (card.description !== undefined && !isText(card.description, LIMITS.kanbanCardDesc)) ||
+    (card.subjectName !== undefined && !isText(card.subjectName, LIMITS.subjectName)) ||
+    (card.category !== undefined && !isText(card.category, LIMITS.type)) ||
+    !KANBAN_PRIORITIES.has(card.priority) ||
+    (card.dueDate !== undefined && card.dueDate !== '' && !validDate(card.dueDate)) ||
+    typeof card.order !== 'number' || !Number.isFinite(card.order)
+  ) {
+    return false;
   }
-
+  if (card.checklist !== undefined) {
+    if (!Array.isArray(card.checklist) || card.checklist.length > LIMITS.kanbanChecklistItems) return false;
+    const itemIds = new Set();
+    if (!card.checklist.every((item) => isValidChecklistItem(item, itemIds) && itemIds.add(item.id))) return false;
+  }
   return true;
 }
 
 /** Rzuca błąd, jeśli tablica Kanban ma nieprawidłową strukturę. Zwraca ten sam obiekt. */
 export function validateKanban(kanban) {
   if (
-    !kanban ||
-    kanban.schemaVersion !== SCHEMA_VERSION ||
-    !Array.isArray(kanban.columns) ||
-    !Array.isArray(kanban.cards) ||
-    kanban.columns.length < 1 ||
-    kanban.columns.length > LIMITS.kanbanColumns ||
-    kanban.cards.length > LIMITS.kanbanCards
+    !kanban || kanban.schemaVersion !== SCHEMA_VERSION ||
+    !Array.isArray(kanban.columns) || !Array.isArray(kanban.cards) ||
+    kanban.columns.length < 1 || kanban.columns.length > LIMITS.kanbanColumns || kanban.cards.length > LIMITS.kanbanCards
   ) {
     throw Error(`Nieprawidłowy format tablicy Kanban (schemaVersion: ${SCHEMA_VERSION}).`);
   }
 
-  const columnIds = new Set();
-  for (const col of kanban.columns) {
-    if (!isValidKanbanColumn(col, columnIds)) {
-      throw Error('Nieprawidłowa kolumna w tablicy Kanban.');
-    }
-    columnIds.add(col.id);
-  }
-
-  const cardIds = new Set();
-  for (const card of kanban.cards) {
-    if (!isValidKanbanCard(card, cardIds, columnIds)) {
-      throw Error('Nieprawidłowa karta zadania w tablicy Kanban.');
-    }
-    cardIds.add(card.id);
-  }
-
+  const columnIds = validateUniqueCollection(kanban.columns, isValidKanbanColumn, 'Nieprawidłowa kolumna w tablicy Kanban.');
+  validateUniqueCollection(kanban.cards, isValidKanbanCard, 'Nieprawidłowa karta zadania w tablicy Kanban.', columnIds);
   return kanban;
 }
