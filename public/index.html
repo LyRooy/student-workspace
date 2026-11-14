@@ -28,6 +28,15 @@
         </button>
       </nav>
       <div class="actions header-actions">
+        <button type="button" id="addEvent" class="primary" hidden>
+          <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zajęcia</span>
+        </button>
+        <button type="button" id="manageKanbanColsBtn" hidden>
+          <i class="ph ph-columns"></i> <span class="btn-label">Kolumny</span>
+        </button>
+        <button type="button" id="addKanbanCardBtn" class="primary" hidden>
+          <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zadanie</span>
+        </button>
         <button
           type="button"
           id="cloudStatusBadge"
@@ -42,15 +51,6 @@
         <button type="button" id="themeToggle" class="desktop-only"><i class="ph ph-circle-half"></i> Auto</button>
         <button type="button" id="editModeToggle" aria-pressed="false">
           <i class="ph ph-pencil-simple"></i> <span class="btn-label">Tryb edycji: Wył.</span>
-        </button>
-        <button type="button" id="addEvent" class="primary" hidden>
-          <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zajęcia</span>
-        </button>
-        <button type="button" id="manageKanbanColsBtn" hidden>
-          <i class="ph ph-columns"></i> <span class="btn-label">Kolumny</span>
-        </button>
-        <button type="button" id="addKanbanCardBtn" class="primary" hidden>
-          <i class="ph ph-plus"></i> <span class="btn-label">Dodaj zadanie</span>
         </button>
         <button
           type="button"
@@ -70,23 +70,23 @@
       <!-- Panel narzędzi (na telefonie rozwijany z przycisku hamburgera „Menu”) -->
       <div id="navPanel" class="nav-panel">
         <section class="toolbar" aria-label="Zarządzanie danymi">
-          <div class="actions">
+          <div class="actions toolbar-left">
             <button type="button" id="themeToggleMobile" class="mobile-only"><i class="ph ph-circle-half"></i> Motyw</button>
             <button type="button" id="subjects"><i class="ph ph-book-open"></i> Przedmioty</button>
-            <button type="button" id="academicYearBtn"><i class="ph ph-calendar-blank"></i> Struktura roku</button>
-            <button type="button" id="bulkManageBtn"><i class="ph ph-trash"></i> Masowe usuwanie / reset</button>
+            <button type="button" id="export"><i class="ph ph-export"></i> <span id="exportLabel">Eksport (.json)</span></button>
+            <button type="button" id="importButton"><i class="ph ph-download-simple"></i> <span id="importLabel">Import (.json)</span></button>
+            <input type="file" id="import" accept="application/json,.json" hidden>
+            <button type="button" id="academicYearBtn" hidden><i class="ph ph-calendar-blank"></i> Struktura roku</button>
+            <button type="button" id="bulkManageBtn" hidden><i class="ph ph-trash"></i> Masowe usuwanie / reset</button>
             <button type="button" id="clearKanbanDoneBtn" hidden>
               <i class="ph ph-check-circle"></i> Wyczyść „Zrobione”
             </button>
             <button type="button" id="resetKanbanBtn" class="danger" hidden>
               <i class="ph ph-trash"></i> Resetuj tablicę
             </button>
-            <button type="button" id="export"><i class="ph ph-export"></i> <span id="exportLabel">Eksport planu (.json)</span></button>
-            <button type="button" id="importButton"><i class="ph ph-download-simple"></i> <span id="importLabel">Import planu (.json)</span></button>
-            <input type="file" id="import" accept="application/json,.json" hidden>
           </div>
-          <div class="actions">
-            <button type="button" id="connection"><i class="ph ph-key"></i> Klucz dostępu</button>
+          <div class="actions toolbar-right">
+            <button type="button" id="connection"><i class="ph ph-key"></i> Ustawienia chmury</button>
             <button type="button" id="pull"><i class="ph ph-arrow-down"></i> <span id="pullLabel">Pobierz z chmury</span></button>
             <button type="button" id="push" class="primary"><i class="ph ph-arrow-up"></i> <span id="pushLabel">Zapisz w chmurze</span></button>
           </div>

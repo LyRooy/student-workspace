@@ -273,10 +273,15 @@ function updateViewToolbarAndHeader() {
   $('clearKanbanDoneBtn').hidden = !isKanban || !editMode;
   $('resetKanbanBtn').hidden = !isKanban || !editMode;
 
-  $('exportLabel').textContent = isKanban ? 'Eksport tablicy (.json)' : 'Eksport planu (.json)';
-  $('importLabel').textContent = isKanban ? 'Import tablicy (.json)' : 'Import planu (.json)';
-  $('pullLabel').textContent = isKanban ? 'Pobierz tablicę z chmury' : 'Pobierz plan z chmury';
-  $('pushLabel').textContent = isKanban ? 'Zapisz tablicę w chmurze' : 'Zapisz plan w chmurze';
+  $('exportLabel').textContent = 'Eksport (.json)';
+  $('importLabel').textContent = 'Import (.json)';
+  $('pullLabel').textContent = 'Pobierz z chmury';
+  $('pushLabel').textContent = 'Zapisz w chmurze';
+
+  $('export').title = isKanban ? 'Eksportuj tablicę Kanban do pliku .json' : 'Eksportuj plan zajęć do pliku .json';
+  $('importButton').title = isKanban ? 'Importuj tablicę Kanban z pliku .json' : 'Importuj plan zajęć z pliku .json';
+  $('pull').title = isKanban ? 'Pobierz najnowszą tablicę Kanban z chmury' : 'Pobierz najnowszy plan zajęć z chmurą';
+  $('push').title = isKanban ? 'Zapisz tablicę Kanban w chmurze' : 'Zapisz plan zajęć w chmurze';
   updateConnectionButtonLabel();
 }
 
@@ -3212,11 +3217,12 @@ function updateConnectionPreviews() {
 function updateConnectionButtonLabel() {
   const btn = $('connection');
   if (!btn) return;
-  const isKanban = activeView === 'kanban';
-  const id = isKanban ? getActiveKanbanId() : getActivePlanId();
-  const defaultFile = isKanban ? 'kanban.json' : 'plan.json';
-  btn.innerHTML = '<i class="ph ph-key"></i> ';
-  btn.append(document.createTextNode(id ? `Chmura (${id}.json)` : `Chmura (${defaultFile})`));
+  const planId = getActivePlanId();
+  const kanbanId = getActiveKanbanId();
+  const planFile = planId ? `${planId}.json` : 'plan.json';
+  const kanbanFile = kanbanId ? `${kanbanId}.json` : 'kanban.json';
+  btn.innerHTML = '<i class="ph ph-key"></i> Ustawienia chmury';
+  btn.title = `Plik planu: ${planFile} · Plik Kanban: ${kanbanFile}`;
 }
 
 function isAutoSyncEnabled() {
