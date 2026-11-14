@@ -80,9 +80,12 @@ async function readBodyWithLimit(request, maxBytes) {
   return new TextDecoder().decode(bytes);
 }
 
-async function getDocument(env, objectKey, { empty, prop, getLabel }) {
+async function getDocument(request, env, objectKey, { empty, prop, getLabel }) {
   const object = await env.PLANS.get(objectKey);
   if (!object) return reply({ [prop]: empty(), etag: null });
+  if (request.headers.get('If-None-Match') === `"${object.etag}"`) {
+    return reply({ unchanged: true, etag: object.etag });
+  }
   try {
     return reply({ [prop]: await object.json(), etag: object.etag });
   } catch {
@@ -156,7 +159,7 @@ export default {
         console.error('Błąd: Brak powiązania R2 env.PLANS w konfiguracji Workera.');
         return error('Brak powiązania magazynu R2 (PLANS) w konfiguracji Workera.', 503);
       }
-      if (request.method === 'GET') return await getDocument(env, objectKey, route);
+      if (request.method === 'GET') return await getDocument(request, env, objectKey, route);
       if (request.method === 'PUT') return await putDocument(request, env, objectKey, route);
       return error('Dozwolone GET i PUT.', 405, { Allow: 'GET, PUT' });
     } catch (err) {

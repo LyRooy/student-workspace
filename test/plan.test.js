@@ -438,4 +438,22 @@ test('walidacja tablicy Kanban i osobny endpoint /api/kanban (osobny plik JSON w
   // Plan zajęć w R2 pozostał całkowicie nienaruszony w osobnym obiekcie plan.json
   const planRead = await (await call(request(), env)).json();
   assert.equal(planRead.plan.events[0].type, 'Wykład');
+
+  // Warunkowe GET z aktualnym If-None-Match zwraca lekkie { unchanged: true, etag }
+  const { etag: kanbanEtag } = await kanbanSave.json();
+  const kanbanNotModified = await (
+    await call(
+      new Request('https://plan.example/api/kanban', {
+        method: 'GET',
+        headers: { Authorization: 'Bearer ' + TOKEN, 'If-None-Match': `"${kanbanEtag}"` },
+      }),
+      env,
+    )
+  ).json();
+  assert.deepEqual(kanbanNotModified, { unchanged: true, etag: kanbanEtag });
+
+  const planNotModified = await (
+    await call(request('GET', undefined, { 'If-None-Match': `"${planRead.etag}"` }), env)
+  ).json();
+  assert.deepEqual(planNotModified, { unchanged: true, etag: planRead.etag });
 });

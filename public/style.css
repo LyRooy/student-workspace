@@ -820,11 +820,10 @@ textarea { min-height: 70px; resize: vertical; }
   flex-direction: column;
   gap: 5px;
   box-shadow: 0 1px 4px #0000000d;
-  cursor: pointer;
+  cursor: grab;
   transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
 }
 
-.kanban-card.editable { cursor: grab; }
 .kanban-card:hover { box-shadow: 0 5px 14px var(--shadow); }
 .kanban-card.dragging { opacity: 0.45; cursor: grabbing; }
 .kanban-card.priority-high { border-left-color: var(--danger); }

@@ -26,8 +26,9 @@ const AUTO_SYNC_KEY = 'student-calendar-auto-sync';
 const API_URL = '/api/plan';
 const KANBAN_API_URL = '/api/kanban';
 const API_TIMEOUT_MS = 20_000;
-const AUTO_SAVE_DELAY_MS = 2500;
-const AUTO_PULL_COOLDOWN_MS = 45_000;
+const AUTO_SAVE_DELAY_MS = 1200;
+const AUTO_PULL_COOLDOWN_MS = 2_500;
+const AUTO_PULL_INTERVAL_MS = 5_000;
 const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 const MIN_TOKEN_LENGTH = 32;
 
@@ -100,6 +101,7 @@ let isScrollLocked = false;
 let planAutoSaveTimer = null;
 let kanbanAutoSaveTimer = null;
 let autoSyncInFlight = 0;
+let autoPullInFlight = false;
 let cloudSyncState = 'unconfigured'; // 'unconfigured' | 'synced' | 'pending' | 'dirty' | 'error'
 let cloudSyncDetail = '';
 let lastAutoPullAt = 0;
@@ -125,7 +127,15 @@ const TARGETS = {
     getTimer: () => planAutoSaveTimer,
     setTimer: (t) => { planAutoSaveTimer = t; },
     onAfterChange: () => { render(); renderKanbanBadge(); if (activeView === 'kanban') renderKanban(); },
-    onAfterPull: () => { render(); renderKanbanBadge(); },
+    onAfterPull: () => {
+      render();
+      renderKanbanBadge();
+      if (activeView === 'kanban') renderKanban();
+      if ($('eventDetailsDialog')?.open && detailsEventId) {
+        if (state.plan.events.some((e) => e.id === detailsEventId)) openEventDetailsDialog(detailsEventId);
+        else $('eventDetailsDialog').close();
+      }
+    },
   },
   kanban: {
     storageKey: KANBAN_STORAGE_KEY,
@@ -147,7 +157,13 @@ const TARGETS = {
     getTimer: () => kanbanAutoSaveTimer,
     setTimer: (t) => { kanbanAutoSaveTimer = t; },
     onAfterChange: () => renderKanban(),
-    onAfterPull: () => renderKanban(),
+    onAfterPull: () => {
+      renderKanban();
+      if ($('kanbanDetailsDialog')?.open && detailsKanbanCardId) {
+        if (kanbanState.kanban.cards.some((c) => c.id === detailsKanbanCardId)) openKanbanDetailsDialog(detailsKanbanCardId);
+        else $('kanbanDetailsDialog').close();
+      }
+    },
   },
 };
 
@@ -231,7 +247,7 @@ function syncModalScrollLock() {
 }
 
 function showDialogModal(dialogEl) {
-  dialogEl.showModal();
+  if (!dialogEl.open) dialogEl.showModal();
   syncModalScrollLock();
 }
 
@@ -306,13 +322,13 @@ function reportState() {
   } else if (activeView === 'kanban') {
     setStatus(
       kanbanState.dirty
-        ? 'Masz lokalne zmiany w tablicy Kanban · Kliknij „Zapisz tablicę w chmurze” lub poczekaj na auto-zapis (2,5 s).'
+        ? 'Masz lokalne zmiany w tablicy Kanban · Kliknij „Zapisz tablicę w chmurze” lub poczekaj na auto-zapis (1,2 s).'
         : 'Tablica Kanban zapisana lokalnie (osobny plik kanban.json) · Pobierz z chmury, aby sprawdzić aktualną wersję.',
     );
   } else {
     setStatus(
       state.dirty
-        ? 'Masz lokalne zmiany · Kliknij „Zapisz plan w chmurze” lub poczekaj na auto-zapis (2,5 s).'
+        ? 'Masz lokalne zmiany · Kliknij „Zapisz plan w chmurze” lub poczekaj na auto-zapis (1,2 s).'
         : 'Plan zapisany lokalnie · Pobierz z chmury, aby sprawdzić aktualną wersję.',
     );
   }
@@ -375,8 +391,8 @@ function setEditMode(enabled) {
     : 'Kliknij zajęcia, aby zobaczyć szczegóły przedmiotu i spotkania. Włącz „Tryb edycji” u góry, aby dodawać lub zmieniać zajęcia oraz edytować strukturę roku.';
 
   $('kanbanHint').innerHTML = editMode
-    ? 'Tryb edycji aktywny: przeciągaj karty między kolumnami (drag &amp; drop), odhaczaj podzadania lub kliknij kartę, aby ją edytować. Tablica zapisuje się w osobnym pliku <code>kanban.json</code>.'
-    : 'Kliknij zadanie, aby zobaczyć jego szczegóły. Włącz „Tryb edycji” u góry, aby dodawać zadania, zmieniać kolumny i przesuwać karty na tablicy Kanban.';
+    ? 'Tryb edycji aktywny: dodawaj zadania, edytuj ich treść, zarządzaj kolumnami, odhaczaj podzadania i przeciągaj karty (<code>kanban.json</code>).'
+    : 'Kliknij zadanie, aby zobaczyć jego szczegóły. Odhaczanie podzadań i przenoszenie kart między kolumnami działa zawsze — włącz „Tryb edycji”, aby dodawać lub edytować zadania i kolumny.';
 
   render();
   renderKanban();
@@ -1690,11 +1706,14 @@ function buildChecklistItems(checklist, onToggle) {
   const frag = document.createDocumentFragment();
   for (const item of checklist) {
     const row = node('label', `kanban-card-checkitem${item.done ? ' done' : ''}`);
+    row.onclick = (e) => e.stopPropagation();
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = item.done;
-    cb.disabled = !editMode;
-    if (editMode) cb.onchange = (e) => { e.stopPropagation(); onToggle(item); };
+    cb.onchange = (e) => {
+      e.stopPropagation();
+      onToggle(item);
+    };
     row.append(cb, node('span', '', item.text));
     frag.append(row);
   }
@@ -1743,44 +1762,47 @@ function openKanbanDetailsDialog(cardId) {
     }));
   }
 
+  $('kanbanDetailsEditBtn').hidden = !editMode;
   showDialogModal($('kanbanDetailsDialog'));
 }
 
 function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
   const el = node('article', `kanban-card priority-${card.priority}${isDoneCol ? ' is-done' : ''}${editMode ? ' editable' : ''}`);
-  el.draggable = editMode;
+  el.draggable = true;
   el.dataset.cardId = card.id;
 
-  if (editMode) {
-    el.addEventListener('dragstart', (e) => {
-      if (e.target?.closest?.('.kanban-card-desc, .rich-link-chip, .kanban-card-checklist')) {
-        e.preventDefault();
-        return;
-      }
-      draggedKanbanCardId = card.id;
-      el.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', card.id);
-    });
-    el.addEventListener('dragend', () => {
-      draggedKanbanCardId = null;
-      el.classList.remove('dragging');
-      for (const colEl of document.querySelectorAll('.kanban-col.drag-over')) colEl.classList.remove('drag-over');
-    });
-  } else {
-    el.onclick = (e) => {
-      if (window.getSelection?.()?.toString().trim() || e.target?.closest?.('a, button, input, label')) return;
-      openKanbanDetailsDialog(card.id);
-    };
-  }
+  const allowSelectAndCheck = (targetEl) => {
+    targetEl.addEventListener('mouseenter', () => { el.draggable = false; });
+    targetEl.addEventListener('mouseleave', () => { el.draggable = true; });
+    targetEl.addEventListener('touchstart', () => { el.draggable = false; }, { passive: true });
+  };
+
+  el.addEventListener('dragstart', (e) => {
+    if (e.target?.closest?.('.kanban-card-desc, .rich-link-chip, .kanban-card-checklist')) {
+      e.preventDefault();
+      return;
+    }
+    draggedKanbanCardId = card.id;
+    el.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', card.id);
+  });
+  el.addEventListener('dragend', () => {
+    draggedKanbanCardId = null;
+    el.classList.remove('dragging');
+    for (const colEl of document.querySelectorAll('.kanban-col.drag-over')) colEl.classList.remove('drag-over');
+  });
+  el.onclick = (e) => {
+    if (window.getSelection?.()?.toString().trim() || e.target?.closest?.('a, button, input, label')) return;
+    if (editMode) openKanbanCardDialog(card.id);
+    else openKanbanDetailsDialog(card.id);
+  };
 
   const badgesRow = node('div', 'kanban-card-badges');
-  if (editMode) {
-    const dragHandle = node('span', 'kanban-drag-handle');
-    dragHandle.title = 'Chwyć tutaj, aby przeciągnąć kartę';
-    dragHandle.innerHTML = '<i class="ph ph-dots-six-vertical"></i>';
-    badgesRow.append(dragHandle);
-  }
+  const dragHandle = node('span', 'kanban-drag-handle');
+  dragHandle.title = 'Chwyć tutaj, aby przeciągnąć kartę';
+  dragHandle.innerHTML = '<i class="ph ph-dots-six-vertical"></i>';
+  badgesRow.append(dragHandle);
 
   const prioIcon = card.priority === 'high' ? 'ph-fire' : card.priority === 'medium' ? 'ph-flag' : 'ph-arrow-down-right';
   badgesRow.append(iconTag(`kanban-prio-badge priority-${card.priority}`, prioIcon, PRIORITY_LABELS[card.priority] || 'Średni'));
@@ -1806,11 +1828,7 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     const descWrap = node('div', 'kanban-card-desc-wrap');
     const descEl = node('div', 'kanban-card-desc');
     renderRichTextWithLinks(descEl, card.description);
-
-    // Wyłączamy draggable nad opisem, aby można było swobodnie zaznaczać tekst/linki
-    descWrap.addEventListener('mouseenter', () => { if (editMode) el.draggable = false; });
-    descWrap.addEventListener('mouseleave', () => { if (editMode) el.draggable = true; });
-    descWrap.addEventListener('touchstart', () => { if (editMode) el.draggable = false; }, { passive: true });
+    allowSelectAndCheck(descWrap);
 
     const previewActions = node('div', 'kanban-desc-actions');
     const viewBtn = iconBtn('kanban-note-action-btn', 'ph-eye', 'Pełny podgląd notatki', (e) => {
@@ -1832,6 +1850,7 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     const pct = Math.round((doneCount / totalCount) * 100);
 
     const checkWrap = node('div', 'kanban-card-checklist');
+    allowSelectAndCheck(checkWrap);
     const progressHead = node('div', 'kanban-check-progress-head');
     const checkLabel = node('span', 'kanban-check-count');
     checkLabel.innerHTML = `<i class="ph ph-check-square-offset"></i> ${doneCount}/${totalCount}`;
@@ -1848,27 +1867,29 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     el.append(checkWrap);
   }
 
+  const actions = node('div', 'kanban-card-actions');
+  if (colIndex > 0) {
+    const prevCol = kanbanState.kanban.columns[colIndex - 1];
+    actions.append(iconBtn('kanban-icon-btn', 'ph-arrow-left', `Przenieś do: ${prevCol.title}`, (e) => {
+      e.stopPropagation();
+      moveKanbanCardToColumn(card.id, prevCol.id);
+    }));
+  }
+  if (colIndex < totalCols - 1) {
+    const nextCol = kanbanState.kanban.columns[colIndex + 1];
+    actions.append(iconBtn('kanban-icon-btn', 'ph-arrow-right', `Przenieś do: ${nextCol.title}`, (e) => {
+      e.stopPropagation();
+      moveKanbanCardToColumn(card.id, nextCol.id);
+    }));
+  }
   if (editMode) {
-    const footer = node('div', 'kanban-card-foot');
-    const actions = node('div', 'kanban-card-actions');
-    if (colIndex > 0) {
-      const prevCol = kanbanState.kanban.columns[colIndex - 1];
-      actions.append(iconBtn('kanban-icon-btn', 'ph-arrow-left', `Przenieś do: ${prevCol.title}`, (e) => {
-        e.stopPropagation();
-        moveKanbanCardToColumn(card.id, prevCol.id);
-      }));
-    }
-    if (colIndex < totalCols - 1) {
-      const nextCol = kanbanState.kanban.columns[colIndex + 1];
-      actions.append(iconBtn('kanban-icon-btn', 'ph-arrow-right', `Przenieś do: ${nextCol.title}`, (e) => {
-        e.stopPropagation();
-        moveKanbanCardToColumn(card.id, nextCol.id);
-      }));
-    }
     actions.append(iconBtn('kanban-icon-btn', 'ph-pencil-simple', 'Edytuj zadanie', (e) => {
       e.stopPropagation();
       openKanbanCardDialog(card.id);
     }));
+  }
+  if (actions.childElementCount > 0) {
+    const footer = node('div', 'kanban-card-foot');
     footer.append(actions);
     el.append(footer);
   }
@@ -1917,23 +1938,21 @@ function renderKanban() {
     colEl.append(head);
 
     const cardsContainer = node('div', 'kanban-cards');
-    if (editMode) {
-      colEl.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; colEl.classList.add('drag-over'); });
-      colEl.addEventListener('dragleave', (e) => { if (!colEl.contains(e.relatedTarget)) colEl.classList.remove('drag-over'); });
-      colEl.addEventListener('drop', (e) => {
-        e.preventDefault();
-        colEl.classList.remove('drag-over');
-        const cardId = draggedKanbanCardId || e.dataTransfer.getData('text/plain');
-        if (!cardId) return;
-        const els = [...cardsContainer.querySelectorAll('.kanban-card:not(.dragging)')];
-        let targetIdx = els.findIndex((cEl) => {
-          const r = cEl.getBoundingClientRect();
-          return e.clientY < r.top + r.height / 2;
-        });
-        if (targetIdx < 0) targetIdx = els.length;
-        moveKanbanCardToColumn(cardId, col.id, targetIdx);
+    colEl.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; colEl.classList.add('drag-over'); });
+    colEl.addEventListener('dragleave', (e) => { if (!colEl.contains(e.relatedTarget)) colEl.classList.remove('drag-over'); });
+    colEl.addEventListener('drop', (e) => {
+      e.preventDefault();
+      colEl.classList.remove('drag-over');
+      const cardId = draggedKanbanCardId || e.dataTransfer.getData('text/plain');
+      if (!cardId) return;
+      const els = [...cardsContainer.querySelectorAll('.kanban-card:not(.dragging)')];
+      let targetIdx = els.findIndex((cEl) => {
+        const r = cEl.getBoundingClientRect();
+        return e.clientY < r.top + r.height / 2;
       });
-    }
+      if (targetIdx < 0) targetIdx = els.length;
+      moveKanbanCardToColumn(cardId, col.id, targetIdx);
+    });
 
     if (!colCards.length) {
       if (editMode) {
@@ -2407,13 +2426,21 @@ const setButtonsDisabled = (disabled) => {
 };
 
 /** Wspólny klient API Workera (/api/plan i /api/kanban) dla sync ręcznego i automatycznego. */
-async function callApi(direction, token, planId, target = 'plan', { silent = false, keepalive = false, payloadJson = null, etagOverride = undefined } = {}) {
+async function callApi(
+  direction,
+  token,
+  planId,
+  target = 'plan',
+  { silent = false, keepalive = false, payloadJson = null, etagOverride = undefined, ifNoneMatchEtag = null } = {},
+) {
   const cfg = TARGETS[target];
   const st = cfg.getState();
   const url = planId ? `${cfg.apiUrl}?id=${encodeURIComponent(planId)}` : cfg.apiUrl;
   const headers = { Authorization: 'Bearer ' + token };
   const options = { method: 'GET', headers, cache: 'no-store', keepalive: Boolean(keepalive) };
   if (!keepalive) options.signal = AbortSignal.timeout(API_TIMEOUT_MS);
+
+  if (direction === 'pull' && ifNoneMatchEtag) headers['If-None-Match'] = `"${ifNoneMatchEtag}"`;
 
   if (direction === 'push') {
     options.method = 'PUT';
@@ -2482,6 +2509,7 @@ async function runAutoPush(target, { keepalive = false } = {}) {
       next.etag = data.etag;
       if (stillSame) next.dirty = false;
       persistTarget(target, next);
+      if (!stillSame) scheduleAutoPush(target);
     }
 
     const timeLabel = new Date().toLocaleTimeString('pl-PL');
@@ -2532,26 +2560,33 @@ function flushPendingAutoPushKeepalive() {
 async function autoPullTarget(target, token) {
   const cfg = TARGETS[target];
   const st = cfg.getState();
-  if (st.dirty) {
-    scheduleAutoPush(target);
+  if (st.dirty || cfg.getTimer() !== null) {
+    if (st.dirty && cfg.getTimer() === null) scheduleAutoPush(target);
     return false;
   }
-  const data = await callApi('pull', token, getActiveId(target), target, { silent: true });
-  if (data.etag !== null && data.etag !== st.etag) {
+  const data = await callApi('pull', token, getActiveId(target), target, {
+    silent: true,
+    ifNoneMatchEtag: st.etag,
+  });
+  const latest = cfg.getState();
+  if (latest.dirty || cfg.getTimer() !== null || busy || storageBlocked) return false;
+  if (data.unchanged) return false;
+
+  if (data.etag !== null && data.etag !== latest.etag) {
     const validated = cfg.validate(data[cfg.prop]);
     persistTarget(target, { [cfg.prop]: validated, etag: data.etag, dirty: false });
     cfg.onAfterPull();
     return true;
   }
-  if (data.etag === null && cfg.hasData(st[cfg.prop])) {
-    persistTarget(target, { ...clone(st), dirty: true });
+  if (data.etag === null && cfg.hasData(latest[cfg.prop])) {
+    persistTarget(target, { ...clone(latest), dirty: true });
     scheduleAutoPush(target);
   }
   return false;
 }
 
 async function autoPullFromCloud(isInitial = false) {
-  if (!hasCloudToken() || !isAutoSyncEnabled() || busy || autoSyncInFlight > 0 || storageBlocked) {
+  if (!hasCloudToken() || !isAutoSyncEnabled() || busy || autoSyncInFlight > 0 || autoPullInFlight || storageBlocked || draggedKanbanCardId) {
     updateCloudStatusIndicator();
     return;
   }
@@ -2559,8 +2594,7 @@ async function autoPullFromCloud(isInitial = false) {
 
   lastAutoPullAt = Date.now();
   const token = (localStorage.getItem(TOKEN_KEY) || '').trim();
-  autoSyncInFlight++;
-  updateCloudStatusIndicator();
+  autoPullInFlight = true;
 
   try {
     const pulledPlan = await autoPullTarget('plan', token);
@@ -2576,7 +2610,7 @@ async function autoPullFromCloud(isInitial = false) {
     cloudSyncState = 'error';
     cloudSyncDetail = err.message;
   } finally {
-    autoSyncInFlight = Math.max(0, autoSyncInFlight - 1);
+    autoPullInFlight = false;
     updateCloudStatusIndicator();
   }
 }
@@ -2817,10 +2851,15 @@ function bindEvents() {
 
   // Zegar, widoczność karty, auto-sync i pliki
   setInterval(updateLiveTimeIndicator, 10_000);
+  setInterval(() => {
+    if (!document.hidden) autoPullFromCloud(false);
+  }, AUTO_PULL_INTERVAL_MS);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) flushPendingAutoPushKeepalive();
     else { updateLiveTimeIndicator(); autoPullFromCloud(false); }
   });
+  window.addEventListener('focus', () => autoPullFromCloud(false));
+  window.addEventListener('online', () => autoPullFromCloud(true));
   window.addEventListener('pagehide', flushPendingAutoPushKeepalive);
   window.addEventListener('beforeunload', (e) => {
     if (planAutoSaveTimer !== null || kanbanAutoSaveTimer !== null || state.dirty || kanbanState.dirty) flushPendingAutoPushKeepalive();
