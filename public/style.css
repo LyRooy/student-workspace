@@ -924,6 +924,15 @@ textarea { min-height: 70px; resize: vertical; }
 .kanban-due-badge.done { background: var(--soft); color: var(--today-border); border: 1px solid var(--line); }
 .kanban-card-actions { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
 .kanban-icon-btn { padding: 5px 7px; border-radius: 6px; font-size: 12px; }
+.kanban-archive-btn { padding: 8px 12px; height: 36px; white-space: nowrap; }
+.kanban-archive-count { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--soft); border: 1px solid var(--line); font-size: 11px; font-weight: 800; color: var(--muted); }
+.kanban-archive-hint { font-size: 10.5px; font-weight: 600; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+.archive-list { max-height: 360px; }
+.archive-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 9px; background: var(--soft); }
+.archive-row-info { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.archive-row-title { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+.archive-row-meta { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.archive-row-actions { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
 
 .kanban-checklist-editor { margin: 12px 0; display: flex; flex-direction: column; gap: 7px; }
 .kanban-checklist-editor .field-label { font-size: 12px; font-weight: 600; }
@@ -1016,7 +1025,7 @@ textarea { min-height: 70px; resize: vertical; }
   .kanban-bar { flex-direction: column; align-items: stretch; gap: 8px; margin-bottom: 10px; }
   .kanban-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; width: 100%; }
   .kanban-filter-item select, .kanban-filter-item input { min-width: 0; padding: 7px 9px; font-size: 12px; }
-  .kanban-search-wrap { grid-column: 1 / -1; }
+  .kanban-search-wrap, .kanban-archive-btn { grid-column: 1 / -1; width: 100%; }
   .mobile-kanban-tabs { grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); }
   .kanban-board { grid-template-columns: minmax(0, 1fr); }
   .hint { font-size: 11px; }

@@ -55,6 +55,7 @@ export const DEFAULT_KANBAN_COLUMNS = [
   { id: 'in_progress', title: 'W trakcie' },
   { id: 'done', title: 'Zrobione' },
 ];
+export const KANBAN_ARCHIVE_AFTER_DAYS = 7;
 
 export const emptyKanban = () => ({
   schemaVersion: SCHEMA_VERSION,
@@ -316,6 +317,8 @@ function isValidKanbanCard(card, knownCardIds, columnIds) {
     (card.category !== undefined && !isText(card.category, LIMITS.type)) ||
     !KANBAN_PRIORITIES.has(card.priority) ||
     (card.dueDate !== undefined && card.dueDate !== '' && !validDate(card.dueDate)) ||
+    (card.completedAt !== undefined && card.completedAt !== '' && !validDate(card.completedAt)) ||
+    (card.archivedAt !== undefined && card.archivedAt !== '' && !validDate(card.archivedAt)) ||
     typeof card.order !== 'number' || !Number.isFinite(card.order)
   ) {
     return false;
@@ -341,4 +344,44 @@ export function validateKanban(kanban) {
   const columnIds = validateUniqueCollection(kanban.columns, isValidKanbanColumn, 'Nieprawidłowa kolumna w tablicy Kanban.');
   validateUniqueCollection(kanban.cards, isValidKanbanCard, 'Nieprawidłowa karta zadania w tablicy Kanban.', columnIds);
   return kanban;
+}
+
+/**
+ * Uzupełnia datę ukończenia (`completedAt`) dla zadań w kolumnie „Zrobione”
+ * i automatycznie archiwizuje zadania starsze niż KANBAN_ARCHIVE_AFTER_DAYS dni.
+ */
+export function reconcileKanbanArchive(kanban, todayStr) {
+  const doneColId = kanban.columns.length > 1 ? kanban.columns[kanban.columns.length - 1].id : null;
+  let changed = false;
+  let archivedCount = 0;
+  let stampedCount = 0;
+
+  for (const card of kanban.cards) {
+    if (card.archivedAt === '') {
+      delete card.archivedAt;
+      changed = true;
+    }
+    if (card.archivedAt) {
+      if (!card.completedAt) {
+        card.completedAt = card.archivedAt;
+        changed = true;
+      }
+      continue;
+    }
+    if (doneColId && card.columnId === doneColId) {
+      if (!card.completedAt) {
+        card.completedAt = todayStr;
+        stampedCount++;
+        changed = true;
+      } else if (addDays(card.completedAt, KANBAN_ARCHIVE_AFTER_DAYS) <= todayStr) {
+        card.archivedAt = todayStr;
+        archivedCount++;
+        changed = true;
+      }
+    } else if (card.completedAt) {
+      delete card.completedAt;
+      changed = true;
+    }
+  }
+  return { changed, archivedCount, stampedCount };
 }

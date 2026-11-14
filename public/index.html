@@ -183,6 +183,16 @@
               <span>Szukaj</span>
               <input type="search" id="kanbanSearch" placeholder="Tytuł, opis, kategoria...">
             </label>
+            <button
+              type="button"
+              id="kanbanArchiveBtn"
+              class="kanban-archive-btn"
+              title="Pokaż zarchiwizowane zadania (ukończone zadania trafiają tu automatycznie po 7 dniach)"
+            >
+              <i class="ph ph-archive"></i>
+              <span>Archiwum</span>
+              <span id="kanbanArchiveCount" class="kanban-archive-count">0</span>
+            </button>
           </div>
         </div>
 
@@ -802,6 +812,31 @@
         </label>
         <p id="kanbanColumnsError" class="error" role="alert"></p>
       </form>
+    </dialog>
+
+    <!-- Okno: archiwum ukończonych zadań tablicy Kanban -->
+    <dialog id="kanbanArchiveDialog">
+      <div class="dialoghead">
+        <h2>Archiwum zadań Kanban</h2>
+        <button type="button" data-close aria-label="Zamknij"><i class="ph ph-x"></i></button>
+      </div>
+
+      <p class="hint">
+        Ukończone zadania z ostatniej kolumny trafiają tutaj automatycznie po 7 dniach od zakończenia. Możesz w każdej chwili podejrzeć ich notatki, przywrócić je na tablicę lub usunąć na stałe.
+      </p>
+
+      <label>
+        Szukaj w archiwum
+        <input type="search" id="kanbanArchiveSearch" placeholder="Tytuł, przedmiot, kategoria, opis...">
+      </label>
+
+      <div id="kanbanArchiveList" class="bulk-list archive-list"></div>
+
+      <div class="dialogfoot">
+        <button type="button" id="clearKanbanArchiveBtn" class="danger">
+          <i class="ph ph-trash"></i> Wyczyść archiwum
+        </button>
+      </div>
     </dialog>
 
     <button

@@ -11,6 +11,7 @@ import {
   emptyKanban,
   validateKanban,
   resolveKanbanKey,
+  reconcileKanbanArchive,
 } from '../public/model.js';
 import worker from '../worker.js';
 
@@ -456,4 +457,34 @@ test('walidacja tablicy Kanban i osobny endpoint /api/kanban (osobny plik JSON w
     await call(request('GET', undefined, { 'If-None-Match': `"${planRead.etag}"` }), env)
   ).json();
   assert.deepEqual(planNotModified, { unchanged: true, etag: planRead.etag });
+});
+
+test('archiwizacja zadań Kanban po 7 dniach i uzupełnianie completedAt', () => {
+  const board = emptyKanban();
+  board.cards.push(
+    { id: 'old_done', columnId: 'done', title: 'Stare zrobione', priority: 'low', order: 0, completedAt: '2026-11-07' },
+    { id: 'fresh_done', columnId: 'done', title: 'Świeże zrobione', priority: 'medium', order: 1, completedAt: '2026-11-08' },
+    { id: 'legacy_done', columnId: 'done', title: 'Stare bez pola daty', priority: 'medium', order: 2 },
+    { id: 'todo_stale_field', columnId: 'todo', title: 'Cofnięte do zrobienia', priority: 'high', order: 0, completedAt: '2026-11-01' },
+  );
+
+  const res = reconcileKanbanArchive(board, '2026-11-14');
+  assert.deepEqual(res, { changed: true, archivedCount: 1, stampedCount: 1 });
+  assert.equal(validateKanban(board).cards.length, 4);
+
+  const byId = Object.fromEntries(board.cards.map((c) => [c.id, c]));
+  assert.equal(byId.old_done.archivedAt, '2026-11-14');
+  assert.equal(byId.fresh_done.archivedAt, undefined);
+  assert.equal(byId.legacy_done.completedAt, '2026-11-14');
+  assert.equal(byId.legacy_done.archivedAt, undefined);
+  assert.equal(byId.todo_stale_field.completedAt, undefined);
+
+  // Ponowne uruchomienie tego samego dnia nie wprowadza już żadnych zmian
+  assert.deepEqual(reconcileKanbanArchive(board, '2026-11-14'), { changed: false, archivedCount: 0, stampedCount: 0 });
+
+  // Po upływie 7 dni od nadania dzisiejszej daty (2026-11-21) zadanie bez wcześniejszej daty też trafia do archiwum
+  const weekLater = reconcileKanbanArchive(board, '2026-11-21');
+  assert.equal(weekLater.archivedCount, 2);
+  assert.equal(byId.fresh_done.archivedAt, '2026-11-21');
+  assert.equal(byId.legacy_done.archivedAt, '2026-11-21');
 });

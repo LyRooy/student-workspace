@@ -55,6 +55,8 @@ Pasek narzędzi pod nagłówkiem (na telefonie rozwijany przyciskiem **Menu**) g
   - Wzbogacony podgląd notatek z klikalnymi linkami i wygodnym kopiowaniem treści.
 - **Wygodna obsługa zawsze pod ręką**:
   - Przeciąganie kart między kolumnami (**Drag & Drop**), szybkie przenoszenie przyciskami strzałek oraz **odhaczanie podzadań na checklistach działają zawsze** — również przy wyłączonym `Tryb edycji`.
+- **Automatyczne archiwum ukończonych zadań**:
+  - Zadania przeniesione do ostatniej kolumny (**Zrobione**) automatycznie przechodzą po **7 dniach** od ukończenia do wbudowanego **Archiwum** (z licznikiem i możliwością podglądu notatek, przywrócenia na tablicę lub trwałego usunięcia).
 - **Tryb edycji w Kanbanie**:
   - Gdy `Tryb edycji` jest wyłączony, kliknięcie w kartę otwiera modal podglądu szczegółów (z kopiowaniem i odhaczaniem checklisty) bez ryzyka przypadkowej edycji treści czy usunięcia zadania.
   - Włączenie `Tryb edycji` odblokowuje dodawanie nowych kart (`Dodaj zadanie` oraz przyciski `+` w kolumnach), edycję i usuwanie zadań oraz menu `Zarządzaj tablicą` (`Kolumny`, `Wyczyść „Zrobione”`, `Resetuj tablicę`).

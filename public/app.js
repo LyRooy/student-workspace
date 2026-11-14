@@ -13,6 +13,8 @@ import {
   emptyKanban,
   validateKanban,
   resolveKanbanKey,
+  KANBAN_ARCHIVE_AFTER_DAYS,
+  reconcileKanbanArchive,
 } from './model.js';
 
 // --- Stałe i stan ------------------------------------------------------------
@@ -158,7 +160,9 @@ const TARGETS = {
     setTimer: (t) => { kanbanAutoSaveTimer = t; },
     onAfterChange: () => renderKanban(),
     onAfterPull: () => {
+      syncKanbanArchiveState({ notify: true });
       renderKanban();
+      if ($('kanbanArchiveDialog')?.open) renderKanbanArchiveList();
       if ($('kanbanDetailsDialog')?.open && detailsKanbanCardId) {
         if (kanbanState.kanban.cards.some((c) => c.id === detailsKanbanCardId)) openKanbanDetailsDialog(detailsKanbanCardId);
         else $('kanbanDetailsDialog').close();
@@ -694,6 +698,7 @@ function updateLiveTimeIndicator() {
   const currentToday = today();
   if (currentToday !== lastRenderedToday) {
     lastRenderedToday = currentToday;
+    syncKanbanArchiveState({ notify: true });
     render();
     return;
   }
@@ -1611,19 +1616,45 @@ function saveSpecialDay(event) {
 
 // --- Tablica Kanban ----------------------------------------------------------
 
+const getDoneColumnId = (kanban = kanbanState.kanban) =>
+  (kanban.columns.length > 1 ? kanban.columns[kanban.columns.length - 1].id : null);
+const isArchivedCard = (card) => Boolean(card?.archivedAt);
+const getActiveKanbanCards = () => kanbanState.kanban.cards.filter((c) => !isArchivedCard(c));
+const getArchivedKanbanCards = () => kanbanState.kanban.cards
+  .filter(isArchivedCard)
+  .sort((a, b) => (b.archivedAt || '').localeCompare(a.archivedAt || '') || (b.completedAt || '').localeCompare(a.completedAt || ''));
+
+function syncKanbanArchiveState({ notify = false } = {}) {
+  if (storageBlocked || busy) return false;
+  const next = clone(kanbanState);
+  const res = reconcileKanbanArchive(next.kanban, today());
+  if (!res.changed) return false;
+
+  validateKanban(next.kanban);
+  next.dirty = true;
+  persistTarget('kanban', next);
+  renderKanban();
+  if ($('kanbanArchiveDialog')?.open) renderKanbanArchiveList();
+  reportState();
+  scheduleAutoPush('kanban');
+  if (notify && res.archivedCount > 0) {
+    setStatus(`Przeniesiono automatycznie do archiwum ${res.archivedCount} ukończonych zadań (starszych niż ${KANBAN_ARCHIVE_AFTER_DAYS} dni).`);
+  }
+  return true;
+}
+
 function getKnownSubjectNames() {
   const names = new Set();
   for (const s of state.plan.subjects) if (s.name?.trim()) names.add(s.name.trim());
-  for (const c of kanbanState.kanban.cards) if (c.subjectName?.trim()) names.add(c.subjectName.trim());
+  for (const c of getActiveKanbanCards()) if (c.subjectName?.trim()) names.add(c.subjectName.trim());
   return [...names].sort((a, b) => a.localeCompare(b, 'pl'));
 }
 
 function renderKanbanBadge() {
   const badge = $('kanbanCountBadge');
   if (!badge) return;
-  const cols = kanbanState.kanban.columns;
-  const lastColId = cols.length > 1 ? cols[cols.length - 1].id : null;
-  const activeCount = kanbanState.kanban.cards.filter((c) => c.columnId !== lastColId).length;
+  const lastColId = getDoneColumnId();
+  const activeCount = getActiveKanbanCards().filter((c) => c.columnId !== lastColId).length;
   badge.textContent = String(activeCount);
   badge.hidden = activeCount === 0;
 }
@@ -1657,7 +1688,7 @@ function getFilteredKanbanCards() {
   const prioFilter = $('kanbanFilterPriority')?.value || '';
   const query = ($('kanbanSearch')?.value || '').trim().toLocaleLowerCase('pl');
 
-  return kanbanState.kanban.cards.filter((card) => {
+  return getActiveKanbanCards().filter((card) => {
     if (subjFilter === '__none__' && card.subjectName) return false;
     if (subjFilter && subjFilter !== '__none__' && (card.subjectName || '') !== subjFilter) return false;
     if (prioFilter && card.priority !== prioFilter) return false;
@@ -1696,8 +1727,18 @@ function moveKanbanCardToColumn(cardId, targetColumnId, targetIndex = null) {
   mutateKanban((kanban) => {
     const card = kanban.cards.find((c) => c.id === cardId);
     if (!card) return;
+    const doneColId = getDoneColumnId(kanban);
+    const wasDone = card.columnId === doneColId && !card.archivedAt;
     card.columnId = targetColumnId;
-    const colCards = kanban.cards.filter((c) => c.columnId === targetColumnId && c.id !== cardId).sort((a, b) => a.order - b.order);
+    delete card.archivedAt;
+    if (doneColId && targetColumnId === doneColId) {
+      if (!wasDone || !card.completedAt) card.completedAt = today();
+    } else {
+      delete card.completedAt;
+    }
+    const colCards = kanban.cards
+      .filter((c) => !c.archivedAt && c.columnId === targetColumnId && c.id !== cardId)
+      .sort((a, b) => a.order - b.order);
     const insertAt = targetIndex === null ? colCards.length : Math.max(0, Math.min(colCards.length, targetIndex));
     colCards.splice(insertAt, 0, card);
     colCards.forEach((c, idx) => { c.order = idx; });
@@ -1736,10 +1777,13 @@ function openKanbanDetailsDialog(cardId) {
 
   const cols = kanbanState.kanban.columns;
   const col = cols.find((c) => c.id === card.columnId);
-  const isDoneCol = cols.length > 1 && cols[cols.length - 1]?.id === card.columnId;
+  const archived = isArchivedCard(card);
+  const isDoneCol = archived || (cols.length > 1 && cols[cols.length - 1]?.id === card.columnId);
 
   $('kanbanDetailsTitle').textContent = card.title;
-  $('kanbanDetailsColumn').textContent = col ? col.title : 'Zadanie';
+  $('kanbanDetailsColumn').textContent = archived
+    ? `Archiwum · Ukończono ${formatDate(card.completedAt || card.archivedAt)}`
+    : (col ? col.title : 'Zadanie');
   $('kanbanDetailsPriority').textContent = `Priorytet: ${PRIORITY_LABELS[card.priority] || 'Średni'}`;
 
   const setBadge = (el, show, icon, text) => {
@@ -1891,14 +1935,29 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
       moveKanbanCardToColumn(card.id, nextCol.id);
     }));
   }
+  if (isDoneCol) {
+    actions.append(iconBtn('kanban-icon-btn', 'ph-archive', 'Przenieś do archiwum teraz', (e) => {
+      e.stopPropagation();
+      archiveKanbanCardNow(card.id);
+    }));
+  }
   if (editMode) {
     actions.append(iconBtn('kanban-icon-btn', 'ph-pencil-simple', 'Edytuj zadanie', (e) => {
       e.stopPropagation();
       openKanbanCardDialog(card.id);
     }));
   }
-  if (actions.childElementCount > 0) {
+  if (isDoneCol || actions.childElementCount > 0) {
     const footer = node('div', 'kanban-card-foot');
+    if (isDoneCol) {
+      const completedDate = card.completedAt || today();
+      const elapsedDays = Math.max(0, Math.round((Date.parse(today() + 'T12:00:00Z') - Date.parse(completedDate + 'T12:00:00Z')) / 86_400_000));
+      const daysLeft = Math.max(1, KANBAN_ARCHIVE_AFTER_DAYS - elapsedDays);
+      const hint = node('span', 'kanban-archive-hint');
+      hint.title = `Ukończono ${formatDate(completedDate)} — automatyczne przeniesienie do archiwum po ${KANBAN_ARCHIVE_AFTER_DAYS} dniach`;
+      hint.innerHTML = `<i class="ph ph-clock-countdown"></i> Do archiwum za ${daysLeft} ${daysLeft === 1 ? 'dzień' : 'dni'}`;
+      footer.append(hint);
+    }
     footer.append(actions);
     el.append(footer);
   }
@@ -1911,10 +1970,14 @@ function renderKanban() {
   updateKanbanSubjectFilterOptions();
 
   const cols = kanbanState.kanban.columns;
-  const allCards = kanbanState.kanban.cards;
+  const allCards = getActiveKanbanCards();
+  const archivedCount = getArchivedKanbanCards().length;
   const filteredCards = getFilteredKanbanCards();
 
-  $('kanbanSummary').textContent = cols.map((col) => `${col.title}: ${allCards.filter((c) => c.columnId === col.id).length}`).join(' · ') || 'Brak kolumn';
+  const summaryParts = cols.map((col) => `${col.title}: ${allCards.filter((c) => c.columnId === col.id).length}`);
+  if (archivedCount > 0) summaryParts.push(`Archiwum: ${archivedCount}`);
+  $('kanbanSummary').textContent = summaryParts.join(' · ') || 'Brak kolumn';
+  if ($('kanbanArchiveCount')) $('kanbanArchiveCount').textContent = String(archivedCount);
   renderMobileKanbanTabs(filteredCards);
 
   const board = $('kanbanBoard');
@@ -2111,14 +2174,18 @@ function saveKanbanCard(event) {
       .filter((item) => item.text.length > 0);
 
     mutateKanban((kanban) => {
+      const doneColId = getDoneColumnId(kanban);
       if (editingKanbanCardId) {
         const existing = kanban.cards.find((c) => c.id === editingKanbanCardId);
         if (!existing) return;
         const colChanged = existing.columnId !== columnId;
         Object.assign(existing, { title, columnId, priority, dueDate, description, subjectName, category, checklist });
-        if (colChanged) existing.order = kanban.cards.filter((c) => c.columnId === columnId && c.id !== existing.id).length;
+        delete existing.archivedAt;
+        if (doneColId && columnId === doneColId) existing.completedAt = existing.completedAt || today();
+        else delete existing.completedAt;
+        if (colChanged) existing.order = kanban.cards.filter((c) => !c.archivedAt && c.columnId === columnId && c.id !== existing.id).length;
       } else {
-        kanban.cards.push({
+        const card = {
           id: uid(),
           columnId,
           title,
@@ -2128,8 +2195,10 @@ function saveKanbanCard(event) {
           priority,
           dueDate,
           checklist,
-          order: kanban.cards.filter((c) => c.columnId === columnId).length,
-        });
+          order: kanban.cards.filter((c) => !c.archivedAt && c.columnId === columnId).length,
+        };
+        if (doneColId && columnId === doneColId) card.completedAt = today();
+        kanban.cards.push(card);
       }
     });
     $('kanbanCardDialog').close();
@@ -2158,12 +2227,13 @@ function renderKanbanColumnsList() {
   const moveCol = (idx, delta) => {
     mutateKanban((kanban) => {
       [kanban.columns[idx], kanban.columns[idx + delta]] = [kanban.columns[idx + delta], kanban.columns[idx]];
+      reconcileKanbanArchive(kanban, today());
     });
     renderKanbanColumnsList();
   };
 
   cols.forEach((col, idx) => {
-    const count = kanbanState.kanban.cards.filter((c) => c.columnId === col.id).length;
+    const count = getActiveKanbanCards().filter((c) => c.columnId === col.id).length;
     const row = node('div', 'seriesrow');
     const input = document.createElement('input');
     input.type = 'text';
@@ -2193,7 +2263,14 @@ function renderKanbanColumnsList() {
     delBtn.disabled = cols.length <= 1 || count > 0;
     delBtn.onclick = () => {
       try {
-        mutateKanban((kanban) => { kanban.columns = kanban.columns.filter((c) => c.id !== col.id); });
+        mutateKanban((kanban) => {
+          kanban.columns = kanban.columns.filter((c) => c.id !== col.id);
+          const fallbackColId = getDoneColumnId(kanban) || kanban.columns[kanban.columns.length - 1]?.id;
+          for (const c of kanban.cards) {
+            if (c.columnId === col.id && fallbackColId) c.columnId = fallbackColId;
+          }
+          reconcileKanbanArchive(kanban, today());
+        });
         renderKanbanColumnsList();
       } catch (err) {
         $('kanbanColumnsError').textContent = err.message;
@@ -2220,6 +2297,7 @@ function addKanbanColumn(event) {
     mutateKanban((kanban) => {
       if (kanban.columns.length >= 12) throw Error('Maksymalnie 12 kolumn w tablicy Kanban.');
       kanban.columns.push({ id: uid(), title });
+      reconcileKanbanArchive(kanban, today());
     });
     $('newKanbanColumnTitle').value = '';
     $('kanbanColumnsError').textContent = '';
@@ -2233,13 +2311,13 @@ function clearKanbanDone() {
   const cols = kanbanState.kanban.columns;
   if (!cols.length) return;
   const doneCol = cols[cols.length - 1];
-  const doneCards = kanbanState.kanban.cards.filter((c) => c.columnId === doneCol.id);
+  const doneCards = getActiveKanbanCards().filter((c) => c.columnId === doneCol.id);
   if (!doneCards.length) {
     setStatus(`W kolumnie „${doneCol.title}” nie ma żadnych ukończonych zadań do usunięcia.`);
     return;
   }
-  if (!confirm(`Usunąć wszystkie zadania (${doneCards.length}) z kolumny „${doneCol.title}”?`)) return;
-  mutateKanban((kanban) => { kanban.cards = kanban.cards.filter((c) => c.columnId !== doneCol.id); });
+  if (!confirm(`Usunąć wszystkie aktywne zadania (${doneCards.length}) z kolumny „${doneCol.title}”?`)) return;
+  mutateKanban((kanban) => { kanban.cards = kanban.cards.filter((c) => isArchivedCard(c) || c.columnId !== doneCol.id); });
   setStatus(`Usunięto ${doneCards.length} ukończonych zadań z kolumny „${doneCol.title}”.`);
 }
 
@@ -2247,6 +2325,100 @@ function resetKanbanBoard() {
   if (!confirm('Czy na pewno wyczyścić całą tablicę Kanban do domyślnych 3 kolumn i usunąć wszystkie zadania?')) return;
   mutateKanban((kanban) => { Object.assign(kanban, emptyKanban()); });
   setStatus('Tablica Kanban została zresetowana. Kliknij „Zapisz tablicę w chmurze”, jeśli chcesz nadpisać też plik kanban.json w chmurze.');
+}
+
+// --- Archiwum tablicy Kanban -------------------------------------------------
+
+function archiveKanbanCardNow(cardId) {
+  const todayStr = today();
+  mutateKanban((kanban) => {
+    const card = kanban.cards.find((c) => c.id === cardId);
+    if (!card) return;
+    const doneColId = getDoneColumnId(kanban);
+    if (doneColId) card.columnId = doneColId;
+    card.completedAt = card.completedAt || todayStr;
+    card.archivedAt = todayStr;
+  });
+  setStatus('Zadanie zostało przeniesione do archiwum.');
+}
+
+function restoreKanbanCardFromArchive(cardId) {
+  const todayStr = today();
+  mutateKanban((kanban) => {
+    const card = kanban.cards.find((c) => c.id === cardId);
+    if (!card) return;
+    const doneColId = getDoneColumnId(kanban) || kanban.columns[kanban.columns.length - 1]?.id;
+    if (doneColId) card.columnId = doneColId;
+    delete card.archivedAt;
+    if (doneColId && doneColId === getDoneColumnId(kanban)) card.completedAt = todayStr;
+    else delete card.completedAt;
+    card.order = kanban.cards.filter((c) => !c.archivedAt && c.columnId === card.columnId && c.id !== card.id).length;
+  });
+  renderKanbanArchiveList();
+  setStatus('Zadanie zostało przywrócone z archiwum na tablicę.');
+}
+
+function deleteArchivedKanbanCard(cardId) {
+  if (!confirm('Czy na pewno trwale usunąć to zarchiwizowane zadanie?')) return;
+  mutateKanban((kanban) => { kanban.cards = kanban.cards.filter((c) => c.id !== cardId); });
+  renderKanbanArchiveList();
+}
+
+function clearKanbanArchive() {
+  const archived = getArchivedKanbanCards();
+  if (!archived.length) return;
+  if (!confirm(`Trwale usunąć wszystkie zarchiwizowane zadania (${archived.length})?`)) return;
+  mutateKanban((kanban) => { kanban.cards = kanban.cards.filter((c) => !isArchivedCard(c)); });
+  renderKanbanArchiveList();
+  setStatus(`Wyczyszczono archiwum tablicy Kanban (${archived.length} zadań).`);
+}
+
+function renderKanbanArchiveList() {
+  const list = $('kanbanArchiveList');
+  if (!list) return;
+  const query = ($('kanbanArchiveSearch')?.value || '').trim().toLocaleLowerCase('pl');
+  const allArchived = getArchivedKanbanCards();
+  $('clearKanbanArchiveBtn').disabled = allArchived.length === 0;
+
+  const filtered = query
+    ? allArchived.filter((c) => [c.title, c.description || '', c.subjectName || '', c.category || ''].join(' ').toLocaleLowerCase('pl').includes(query))
+    : allArchived;
+
+  list.replaceChildren();
+  if (!filtered.length) {
+    list.append(node('p', 'hint', allArchived.length
+      ? 'Brak zarchiwizowanych zadań pasujących do wyszukiwania.'
+      : `Archiwum jest puste. Ukończone zadania trafiają tu automatycznie po ${KANBAN_ARCHIVE_AFTER_DAYS} dniach.`));
+    return;
+  }
+
+  for (const card of filtered) {
+    const row = node('div', 'archive-row');
+    const info = node('div', 'archive-row-info');
+    info.append(node('div', 'archive-row-title', card.title));
+    const meta = [
+      card.subjectName,
+      card.category,
+      `Ukończono: ${formatDate(card.completedAt || card.archivedAt)}`,
+      `W archiwum od: ${formatDate(card.archivedAt)}`,
+    ].filter(Boolean).join(' · ');
+    info.append(node('div', 'archive-row-meta', meta));
+
+    const actions = node('div', 'archive-row-actions');
+    actions.append(
+      iconBtn('kanban-icon-btn', 'ph-eye', 'Zobacz szczegóły i notatki', () => openKanbanDetailsDialog(card.id)),
+      iconBtn('kanban-icon-btn', 'ph-arrow-counter-clockwise', 'Przywróć do kolumny „Zrobione”', () => restoreKanbanCardFromArchive(card.id), 'Przywróć'),
+      iconBtn('danger kanban-icon-btn', 'ph-trash', 'Usuń trwale z archiwum', () => deleteArchivedKanbanCard(card.id)),
+    );
+    row.append(info, actions);
+    list.append(row);
+  }
+}
+
+function openKanbanArchiveDialog() {
+  $('kanbanArchiveSearch').value = '';
+  renderKanbanArchiveList();
+  showDialogModal($('kanbanArchiveDialog'));
 }
 
 // --- Nawigacja, import i eksport ---------------------------------------------
@@ -2281,6 +2453,7 @@ async function importActiveView() {
     const target = looksLikeKanban || activeView === 'kanban' ? 'kanban' : 'plan';
     const isKanban = target === 'kanban';
     const validated = TARGETS[target].validate(parsed);
+    if (isKanban) reconcileKanbanArchive(validated, today());
 
     if (!confirm(`Zastąpić lokalny ${isKanban ? 'zapis tablicy Kanban' : 'plan zajęć'} danymi z pliku JSON? W razie potrzeby najpierw wyeksportuj obecną kopię.`)) return;
     if (activeView !== (isKanban ? 'kanban' : 'calendar')) setActiveView(isKanban ? 'kanban' : 'calendar');
@@ -2675,6 +2848,7 @@ async function sync(direction) {
     setButtonsDisabled(false);
     updateCloudStatusIndicator();
   }
+  if (direction === 'pull' && target === 'kanban') syncKanbanArchiveState({ notify: true });
 }
 
 // --- Podpięcie zdarzeń -------------------------------------------------------
@@ -2721,6 +2895,9 @@ function bindEvents() {
   $('kanbanFilterSubject').onchange = renderKanban;
   $('kanbanFilterPriority').onchange = renderKanban;
   $('kanbanSearch').oninput = renderKanban;
+  $('kanbanArchiveBtn').onclick = openKanbanArchiveDialog;
+  $('kanbanArchiveSearch').oninput = renderKanbanArchiveList;
+  $('clearKanbanArchiveBtn').onclick = clearKanbanArchive;
 
   $('kanbanCardSubjectSelect').onchange = () => toggleCustomInput($('kanbanCardSubjectSelect'), $('kanbanCardSubjectCustom'), KANBAN_CUSTOM_SUBJECT, true);
   $('kanbanCardCategorySelect').onchange = () => toggleCustomInput($('kanbanCardCategorySelect'), $('kanbanCardCategoryCustom'), KANBAN_CUSTOM_CATEGORY, true);
@@ -2922,4 +3099,8 @@ updateConnectionButtonLabel();
 renderKanbanBadge();
 setEditMode(false);
 reportState();
-autoPullFromCloud(true);
+if (hasCloudToken() && isAutoSyncEnabled()) {
+  autoPullFromCloud(true).finally(() => syncKanbanArchiveState({ notify: true }));
+} else {
+  syncKanbanArchiveState({ notify: true });
+}
