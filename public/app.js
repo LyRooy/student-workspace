@@ -22,9 +22,12 @@ const KANBAN_STORAGE_KEY = 'student-kanban-v1';
 const TOKEN_KEY = 'student-calendar-token';
 const PLAN_ID_KEY = 'student-calendar-plan-id';
 const KANBAN_ID_KEY = 'student-calendar-kanban-id';
+const AUTO_SYNC_KEY = 'student-calendar-auto-sync';
 const API_URL = '/api/plan'; // ten sam adres co frontend — Worker obsługuje oba
 const KANBAN_API_URL = '/api/kanban';
 const API_TIMEOUT_MS = 20_000;
+const AUTO_SAVE_DELAY_MS = 2500;
+const AUTO_PULL_COOLDOWN_MS = 45_000;
 const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 const MIN_TOKEN_LENGTH = 32;
 const DAY_NAMES = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Ndz'];
@@ -59,6 +62,12 @@ let currentGridBounds = { startMin: 8 * 60, endMin: 16 * 60 };
 let lastRenderedToday = today();
 let lockedScrollY = 0;
 let isScrollLocked = false;
+let planAutoSaveTimer = null;
+let kanbanAutoSaveTimer = null;
+let autoSyncInFlight = 0;
+let cloudSyncState = 'unconfigured'; // 'unconfigured' | 'synced' | 'pending' | 'dirty' | 'error'
+let cloudSyncDetail = '';
+let lastAutoPullAt = 0;
 
 // --- Narzędzia ---------------------------------------------------------------
 
@@ -190,6 +199,11 @@ function renderRichTextWithLinks(container, rawText) {
 }
 
 const dayMonthFormat = new Intl.DateTimeFormat('pl-PL', { day: 'numeric', month: 'long' });
+const shortClockDateFormat = new Intl.DateTimeFormat('pl-PL', {
+  weekday: 'short',
+  day: 'numeric',
+  month: 'short',
+});
 const fullDateFormat = new Intl.DateTimeFormat('pl-PL', {
   weekday: 'long',
   day: 'numeric',
@@ -210,25 +224,28 @@ function setStatus(message) {
 function reportState() {
   if (storageBlocked) {
     setStatus('Nie można bezpiecznie zapisać danych lokalnych. Wyeksportuj plik JSON i sprawdź pamięć przeglądarki.');
+    updateCloudStatusIndicator();
     return;
   }
   if (activeView === 'kanban') {
     if (kanbanState.dirty) {
       setStatus(
-        'Masz lokalne zmiany w tablicy Kanban · Kliknij „Zapisz tablicę w chmurze”, aby zapisać osobny plik kanban.json w chmurze.',
+        'Masz lokalne zmiany w tablicy Kanban · Kliknij „Zapisz tablicę w chmurze” lub poczekaj na auto-zapis (2,5 s).',
       );
     } else {
       setStatus(
         'Tablica Kanban zapisana lokalnie (osobny plik kanban.json) · Pobierz z chmury, aby sprawdzić aktualną wersję.',
       );
     }
+    updateCloudStatusIndicator();
     return;
   }
   if (state.dirty) {
-    setStatus('Masz lokalne zmiany · Kliknij „Zapisz plan w chmurze”, aby nadpisać plan w chmurze i udostępnić go na innych urządzeniach.');
+    setStatus('Masz lokalne zmiany · Kliknij „Zapisz plan w chmurze” lub poczekaj na auto-zapis (2,5 s).');
   } else {
     setStatus('Plan zapisany lokalnie · Pobierz z chmury, aby sprawdzić aktualną wersję.');
   }
+  updateCloudStatusIndicator();
 }
 
 function updateViewToolbarAndHeader() {
@@ -376,6 +393,7 @@ function mutate(change) {
   renderKanbanBadge();
   if (activeView === 'kanban') renderKanban();
   reportState();
+  scheduleAutoPush('plan');
 }
 
 /** Wykonuje zmianę na kopii tablicy Kanban, waliduje ją, zapisuje lokalnie i odświeża widok. */
@@ -390,6 +408,7 @@ function mutateKanban(change) {
   persistKanban(next);
   renderKanban();
   reportState();
+  scheduleAutoPush('kanban');
 }
 
 // Mapowanie dni tygodnia na klucze
@@ -721,6 +740,11 @@ function updateLiveTimeIndicator() {
   const timeStr = nowTimeLabel();
   const topClock = $('liveClockText');
   if (topClock) topClock.textContent = timeStr;
+  const topClockDate = $('liveClockDate');
+  if (topClockDate) {
+    const rawDate = shortClockDateFormat.format(new Date()).replace(/\./g, '');
+    topClockDate.textContent = rawDate.charAt(0).toUpperCase() + rawDate.slice(1);
+  }
 
   const currentToday = today();
   if (currentToday !== lastRenderedToday) {
@@ -1785,7 +1809,7 @@ function clearAllEvents() {
   }
   if (
     !confirm(
-      `Czy na pewno usunąć WSZYSTKIE zajęcia (${state.plan.events.length} spotkań) z kalendarza? Przedmioty oraz struktura roku zostaną zachowane.`,
+      `Czy na pewno usunąć WSZYSTKIE zajęcia (${state.plan.events.length} spotkań) z planu zajęć? Przedmioty oraz struktura roku zostaną zachowane.`,
     )
   ) {
     return;
@@ -1802,7 +1826,7 @@ function clearAllEvents() {
 function clearEntireCalendar() {
   if (
     !confirm(
-      'Czy na pewno wyczyścić CAŁY kalendarz do zera (wszystkie zajęcia, przedmioty oraz strukturę roku)? Tej operacji nie można cofnąć lokalnie bez kopii JSON.',
+      'Czy na pewno wyczyścić CAŁY plan zajęć do zera (wszystkie zajęcia, przedmioty oraz strukturę roku)? Tej operacji nie można cofnąć lokalnie bez kopii JSON.',
     )
   ) {
     return;
@@ -1813,7 +1837,7 @@ function clearEntireCalendar() {
   });
   renderSeriesList();
   $('bulkDialog').close();
-  setStatus('Kalendarz został całkowicie wyczyszczony do zera. Kliknij „Zapisz w chmurze”, aby nadpisać dane w chmurze.');
+  setStatus('Plan zajęć został całkowicie wyczyszczony do zera. Kliknij „Zapisz w chmurze”, aby nadpisać dane w chmurze.');
 }
 
 // --- Struktura roku akademickiego ------------------------------------------
@@ -2341,7 +2365,7 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     };
   }
 
-  // 1. Pasek plakietek na górze karty (Uchwyt przeciągania w trybie edycji, Priorytet, Kategoria, Przedmiot)
+  // 1. Pasek plakietek na górze karty (Uchwyt przeciągania w trybie edycji, Priorytet, Kategoria, Przedmiot, Termin)
   const badgesRow = node('div', 'kanban-card-badges');
 
   if (editMode) {
@@ -2377,6 +2401,14 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     badgesRow.append(subjBadge);
   }
 
+  const dueInfo = getDueDateStatus(card.dueDate, isDoneCol);
+  if (dueInfo) {
+    const dueBadge = node('span', `kanban-due-badge ${dueInfo.variant}`);
+    dueBadge.innerHTML = `<i class="ph ${dueInfo.icon}"></i>`;
+    dueBadge.append(node('span', '', dueInfo.label));
+    badgesRow.append(dueBadge);
+  }
+
   el.append(badgesRow);
 
   // 2. Tytuł zadania (w trybie edycji otwiera edycję, w trybie przeglądania szczegóły)
@@ -2392,7 +2424,7 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
   };
   el.append(titleBtn);
 
-  // 3. Opis / notatka (z klikalnymi linkami, przyciskiem kopiowania i normalnym zaznaczaniem tekstu bez konfliktu z Drag & Drop)
+  // 3. Opis / notatka (kompaktowy podgląd do 2 linii + ikony podglądu i kopiowania obok)
   if (card.description?.trim()) {
     const descWrap = node('div', 'kanban-card-desc-wrap');
     const descEl = node('div', 'kanban-card-desc');
@@ -2414,10 +2446,12 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
       { passive: true },
     );
 
-    const previewActions = node('div', 'kanban-desc-bar');
+    const previewActions = node('div', 'kanban-desc-actions');
     const viewNoteBtn = node('button', 'kanban-note-action-btn');
     viewNoteBtn.type = 'button';
-    viewNoteBtn.innerHTML = '<i class="ph ph-eye"></i> <span>Podgląd notatki</span>';
+    viewNoteBtn.title = 'Pełny podgląd notatki';
+    viewNoteBtn.setAttribute('aria-label', 'Pełny podgląd notatki');
+    viewNoteBtn.innerHTML = '<i class="ph ph-eye"></i>';
     viewNoteBtn.onclick = (e) => {
       e.stopPropagation();
       openKanbanDetailsDialog(card.id);
@@ -2425,10 +2459,12 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
 
     const copyNoteBtn = node('button', 'kanban-note-action-btn');
     copyNoteBtn.type = 'button';
-    copyNoteBtn.innerHTML = '<i class="ph ph-copy"></i> <span>Kopiuj</span>';
+    copyNoteBtn.title = 'Kopiuj notatkę';
+    copyNoteBtn.setAttribute('aria-label', 'Kopiuj notatkę');
+    copyNoteBtn.innerHTML = '<i class="ph ph-copy"></i>';
     copyNoteBtn.onclick = (e) => {
       e.stopPropagation();
-      copyTextWithFeedback(card.description, copyNoteBtn, 'Kopiuj');
+      copyTextWithFeedback(card.description, copyNoteBtn);
     };
 
     previewActions.append(viewNoteBtn, copyNoteBtn);
@@ -2436,7 +2472,7 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     el.append(descWrap);
   }
 
-  // 4. Checklista podzadań na karcie (aktywna w trybie edycji, podgląd w trybie przeglądania)
+  // 4. Checklista podzadań na karcie (kompaktowy pasek postępu + lista podzadań)
   if (card.checklist && card.checklist.length > 0) {
     const doneCount = card.checklist.filter((i) => i.done).length;
     const totalCount = card.checklist.length;
@@ -2446,13 +2482,14 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     const progressHead = node('div', 'kanban-check-progress-head');
     const checkLabel = node('span', 'kanban-check-count');
     checkLabel.innerHTML = `<i class="ph ph-check-square-offset"></i> ${doneCount}/${totalCount}`;
-    const pctLabel = node('span', 'kanban-check-pct', `${pct}%`);
-    progressHead.append(checkLabel, pctLabel);
 
     const progressBar = node('div', 'kanban-check-bar');
     const progressFill = node('div', 'kanban-check-fill');
     progressFill.style.width = `${pct}%`;
     progressBar.append(progressFill);
+
+    const pctLabel = node('span', 'kanban-check-pct', `${pct}%`);
+    progressHead.append(checkLabel, progressBar, pctLabel);
 
     const listEl = node('div', 'kanban-card-checkitems');
     for (const item of card.checklist) {
@@ -2471,68 +2508,54 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
       listEl.append(itemLabel);
     }
 
-    checkWrap.append(progressHead, progressBar, listEl);
+    checkWrap.append(progressHead, listEl);
     el.append(checkWrap);
   }
 
-  // 5. Stopka karty: termin wykonania + przyciski szybkiego przesuwania i edycji (tylko w trybie edycji)
-  const dueInfo = getDueDateStatus(card.dueDate, isDoneCol);
-  if (dueInfo || editMode) {
+  // 5. Stopka karty: przyciski szybkiego przesuwania i edycji (tylko w trybie edycji)
+  if (editMode) {
     const footer = node('div', 'kanban-card-foot');
-
-    if (dueInfo) {
-      const dueBadge = node('span', `kanban-due-badge ${dueInfo.variant}`);
-      dueBadge.innerHTML = `<i class="ph ${dueInfo.icon}"></i>`;
-      dueBadge.append(node('span', '', dueInfo.label));
-      footer.append(dueBadge);
-    } else {
-      footer.append(node('span', 'kanban-due-empty', ''));
-    }
-
-    if (editMode) {
-      const actions = node('div', 'kanban-card-actions');
-      if (colIndex > 0) {
-        const prevCol = kanbanState.kanban.columns[colIndex - 1];
-        const leftBtn = node('button', 'kanban-icon-btn');
-        leftBtn.type = 'button';
-        leftBtn.title = `Przenieś do: ${prevCol.title}`;
-        leftBtn.setAttribute('aria-label', `Przenieś do: ${prevCol.title}`);
-        leftBtn.innerHTML = '<i class="ph ph-arrow-left"></i>';
-        leftBtn.onclick = (e) => {
-          e.stopPropagation();
-          moveKanbanCardToColumn(card.id, prevCol.id);
-        };
-        actions.append(leftBtn);
-      }
-
-      if (colIndex < totalCols - 1) {
-        const nextCol = kanbanState.kanban.columns[colIndex + 1];
-        const rightBtn = node('button', 'kanban-icon-btn');
-        rightBtn.type = 'button';
-        rightBtn.title = `Przenieś do: ${nextCol.title}`;
-        rightBtn.setAttribute('aria-label', `Przenieś do: ${nextCol.title}`);
-        rightBtn.innerHTML = '<i class="ph ph-arrow-right"></i>';
-        rightBtn.onclick = (e) => {
-          e.stopPropagation();
-          moveKanbanCardToColumn(card.id, nextCol.id);
-        };
-        actions.append(rightBtn);
-      }
-
-      const editBtn = node('button', 'kanban-icon-btn');
-      editBtn.type = 'button';
-      editBtn.title = 'Edytuj zadanie';
-      editBtn.setAttribute('aria-label', 'Edytuj zadanie');
-      editBtn.innerHTML = '<i class="ph ph-pencil-simple"></i>';
-      editBtn.onclick = (e) => {
+    const actions = node('div', 'kanban-card-actions');
+    if (colIndex > 0) {
+      const prevCol = kanbanState.kanban.columns[colIndex - 1];
+      const leftBtn = node('button', 'kanban-icon-btn');
+      leftBtn.type = 'button';
+      leftBtn.title = `Przenieś do: ${prevCol.title}`;
+      leftBtn.setAttribute('aria-label', `Przenieś do: ${prevCol.title}`);
+      leftBtn.innerHTML = '<i class="ph ph-arrow-left"></i>';
+      leftBtn.onclick = (e) => {
         e.stopPropagation();
-        openKanbanCardDialog(card.id);
+        moveKanbanCardToColumn(card.id, prevCol.id);
       };
-      actions.append(editBtn);
-
-      footer.append(actions);
+      actions.append(leftBtn);
     }
 
+    if (colIndex < totalCols - 1) {
+      const nextCol = kanbanState.kanban.columns[colIndex + 1];
+      const rightBtn = node('button', 'kanban-icon-btn');
+      rightBtn.type = 'button';
+      rightBtn.title = `Przenieś do: ${nextCol.title}`;
+      rightBtn.setAttribute('aria-label', `Przenieś do: ${nextCol.title}`);
+      rightBtn.innerHTML = '<i class="ph ph-arrow-right"></i>';
+      rightBtn.onclick = (e) => {
+        e.stopPropagation();
+        moveKanbanCardToColumn(card.id, nextCol.id);
+      };
+      actions.append(rightBtn);
+    }
+
+    const editBtn = node('button', 'kanban-icon-btn');
+    editBtn.type = 'button';
+    editBtn.title = 'Edytuj zadanie';
+    editBtn.setAttribute('aria-label', 'Edytuj zadanie');
+    editBtn.innerHTML = '<i class="ph ph-pencil-simple"></i>';
+    editBtn.onclick = (e) => {
+      e.stopPropagation();
+      openKanbanCardDialog(card.id);
+    };
+    actions.append(editBtn);
+
+    footer.append(actions);
     el.append(footer);
   }
 
@@ -3196,11 +3219,72 @@ function updateConnectionButtonLabel() {
   btn.append(document.createTextNode(id ? `Chmura (${id}.json)` : `Chmura (${defaultFile})`));
 }
 
+function isAutoSyncEnabled() {
+  try {
+    const raw = localStorage.getItem(AUTO_SYNC_KEY);
+    return raw === null ? true : raw === 'true';
+  } catch {
+    return true;
+  }
+}
+
+function hasCloudToken() {
+  try {
+    const t = (localStorage.getItem(TOKEN_KEY) || '').trim();
+    return t.length >= MIN_TOKEN_LENGTH;
+  } catch {
+    return false;
+  }
+}
+
+function updateCloudStatusIndicator(stateOverride = null, detailOverride = null) {
+  const badge = $('cloudStatusBadge');
+  const labelEl = $('cloudStatusText');
+  if (!badge || !labelEl) return;
+
+  if (detailOverride !== null) {
+    cloudSyncDetail = detailOverride;
+  }
+
+  let effectiveState = 'synced';
+  let text = 'Zsynchronizowano';
+  let title = `Wszystkie zmiany zapisane w chmurze${cloudSyncDetail ? ` (${cloudSyncDetail})` : ''}`;
+
+  if (!hasCloudToken()) {
+    effectiveState = 'unconfigured';
+    text = 'Chmura';
+    title = 'Brak klucza dostępu — kliknij, aby skonfigurować synchronizację z chmurą';
+  } else if (stateOverride === 'error' || cloudSyncState === 'error') {
+    effectiveState = 'error';
+    text = 'Błąd synchr.';
+    title = cloudSyncDetail || 'Błąd synchronizacji lub konflikt wersji w chmurze — kliknij, aby sprawdzić ustawienia';
+  } else if (autoSyncInFlight > 0 || planAutoSaveTimer !== null || kanbanAutoSaveTimer !== null) {
+    effectiveState = 'pending';
+    text = 'Zapisywanie…';
+    title = 'Trwa automatyczna synchronizacja danych z chmurą…';
+  } else if (state.dirty || kanbanState.dirty) {
+    effectiveState = 'dirty';
+    text = 'Niezapisane';
+    title = isAutoSyncEnabled()
+      ? 'Masz lokalne zmiany oczekujące na automatyczny zapis w chmurze'
+      : 'Masz lokalne zmiany — auto-synchronizacja jest wyłączona (zapisz ręcznie w Menu)';
+  } else if (!isAutoSyncEnabled()) {
+    effectiveState = 'synced';
+    text = 'Auto-synchr. wył.';
+    title = 'Automatyczna synchronizacja wyłączona — brak niezapisanych zmian';
+  }
+
+  badge.dataset.state = effectiveState;
+  labelEl.textContent = text;
+  badge.title = title;
+}
+
 function openConnectionDialog() {
   try {
     $('planId').value = getActivePlanId();
     $('kanbanId').value = getActiveKanbanId();
     $('token').value = localStorage.getItem(TOKEN_KEY) || '';
+    $('autoSyncEnabled').checked = isAutoSyncEnabled();
     $('connectionError').textContent = '';
     updateConnectionPreviews();
     showDialogModal($('connectionDialog'));
@@ -3224,6 +3308,7 @@ function saveConnection(event) {
       throw Error(`Klucz musi mieć minimum ${MIN_TOKEN_LENGTH} znaki.`);
     }
 
+    const autoSyncEnabled = $('autoSyncEnabled').checked;
     const prevPlanId = getActivePlanId();
     const prevKanbanId = getActiveKanbanId();
 
@@ -3235,6 +3320,8 @@ function saveConnection(event) {
 
     if (token) localStorage.setItem(TOKEN_KEY, token);
     else localStorage.removeItem(TOKEN_KEY);
+
+    localStorage.setItem(AUTO_SYNC_KEY, String(autoSyncEnabled));
 
     if (rawPlanId !== prevPlanId) {
       const next = clone(state);
@@ -3248,12 +3335,18 @@ function saveConnection(event) {
       persistKanban(nextKanban);
     }
 
+    cloudSyncState = hasCloudToken() ? 'synced' : 'unconfigured';
     updateConnectionButtonLabel();
+    updateCloudStatusIndicator();
     $('connectionError').textContent = '';
     $('connectionDialog').close();
     setStatus(
-      `Zapisano ustawienia chmury (plan: ${planKey} · tablica Kanban: ${kanbanKey}).`,
+      `Zapisano ustawienia chmury (plan: ${planKey} · tablica Kanban: ${kanbanKey} · auto-synchr.: ${autoSyncEnabled ? 'wł.' : 'wył.'}).`,
     );
+
+    if (token && autoSyncEnabled) {
+      autoPullFromCloud(true);
+    }
   } catch (err) {
     $('connectionError').textContent = err.message;
   }
@@ -3261,6 +3354,251 @@ function saveConnection(event) {
 
 function setButtonsDisabled(disabled) {
   for (const button of document.querySelectorAll('button')) button.disabled = disabled;
+}
+
+/** Wysyła żądanie do Workera (/api/plan lub /api/kanban) bez okien confirm (do auto-synchronizacji). */
+async function callApiSilent(direction, token, planId, target = 'plan', { keepalive = false, payloadJson = null, etagOverride = undefined } = {}) {
+  const isKanban = target === 'kanban';
+  const baseUrl = isKanban ? KANBAN_API_URL : API_URL;
+  const url = planId ? `${baseUrl}?id=${encodeURIComponent(planId)}` : baseUrl;
+  const headers = { Authorization: 'Bearer ' + token };
+  const options = {
+    method: 'GET',
+    headers,
+    cache: 'no-store',
+    keepalive: Boolean(keepalive),
+  };
+  if (!keepalive) {
+    options.signal = AbortSignal.timeout(API_TIMEOUT_MS);
+  }
+
+  const currentObj = isKanban ? kanbanState.kanban : state.plan;
+  const currentEtag = isKanban ? kanbanState.etag : state.etag;
+
+  if (direction === 'push') {
+    options.method = 'PUT';
+    options.body = payloadJson ?? JSON.stringify(currentObj);
+    headers['Content-Type'] = 'application/json';
+    const etagToUse = etagOverride !== undefined ? etagOverride : currentEtag;
+    if (etagToUse) headers['If-Match'] = `"${etagToUse}"`;
+    else headers['If-None-Match'] = '*';
+  }
+
+  const response = await fetch(url, options);
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw Error('API nie jest dostępne.');
+  }
+
+  if (response.status === 409) {
+    const err = Error(data.error || 'Konflikt wersji w chmurze.');
+    err.isConflict = true;
+    throw err;
+  }
+
+  if (!response.ok) throw Error(data.error || 'Błąd połączenia z chmurą.');
+  return data;
+}
+
+async function runAutoPush(target, { keepalive = false } = {}) {
+  if (busy || storageBlocked || !hasCloudToken() || !isAutoSyncEnabled()) {
+    updateCloudStatusIndicator();
+    return;
+  }
+
+  const isKanban = target === 'kanban';
+  const isDirty = isKanban ? kanbanState.dirty : state.dirty;
+  if (!isDirty) {
+    updateCloudStatusIndicator();
+    return;
+  }
+
+  const token = (localStorage.getItem(TOKEN_KEY) || '').trim();
+  const activeId = isKanban ? getActiveKanbanId() : getActivePlanId();
+  const fileKey = isKanban ? resolveKanbanKey(activeId) : resolvePlanKey(activeId);
+  const snapshotObj = isKanban ? kanbanState.kanban : state.plan;
+  const snapshotJson = JSON.stringify(snapshotObj);
+  const etagAtSend = isKanban ? kanbanState.etag : state.etag;
+
+  autoSyncInFlight++;
+  if (cloudSyncState === 'error') cloudSyncState = 'pending';
+  updateCloudStatusIndicator();
+
+  try {
+    const data = await callApiSilent('push', token, activeId, target, {
+      keepalive,
+      payloadJson: snapshotJson,
+      etagOverride: etagAtSend,
+    });
+
+    if (!storageBlocked) {
+      if (isKanban) {
+        const stillSame = JSON.stringify(kanbanState.kanban) === snapshotJson;
+        const next = clone(kanbanState);
+        next.etag = data.etag;
+        if (stillSame) next.dirty = false;
+        persistKanban(next);
+      } else {
+        const stillSame = JSON.stringify(state.plan) === snapshotJson;
+        const next = clone(state);
+        next.etag = data.etag;
+        if (stillSame) next.dirty = false;
+        persist(next);
+      }
+    }
+
+    const timeLabel = new Date().toLocaleTimeString('pl-PL');
+    cloudSyncState = 'synced';
+    cloudSyncDetail = timeLabel;
+    if (!state.dirty && !kanbanState.dirty) {
+      setStatus(`Auto-zapis w chmurze (${fileKey}) · ${timeLabel}.`);
+    }
+  } catch (err) {
+    cloudSyncState = 'error';
+    cloudSyncDetail = err.isConflict
+      ? `Konflikt wersji (${fileKey}) — pobierz lub nadpisz ręcznie w Menu`
+      : `${err.message}`;
+    setStatus(
+      err.isConflict
+        ? `Konflikt wersji w chmurze (${fileKey}) — kliknij „Pobierz z chmury” lub „Zapisz w chmurze” w Menu.`
+        : `Błąd auto-zapisu (${fileKey}): ${err.message}`,
+    );
+  } finally {
+    autoSyncInFlight = Math.max(0, autoSyncInFlight - 1);
+    updateCloudStatusIndicator();
+  }
+}
+
+function scheduleAutoPush(target) {
+  if (cloudSyncState === 'error') {
+    cloudSyncState = 'dirty';
+  }
+  if (!hasCloudToken() || !isAutoSyncEnabled() || storageBlocked) {
+    updateCloudStatusIndicator();
+    return;
+  }
+
+  if (target === 'kanban') {
+    if (kanbanAutoSaveTimer !== null) clearTimeout(kanbanAutoSaveTimer);
+    kanbanAutoSaveTimer = setTimeout(() => {
+      kanbanAutoSaveTimer = null;
+      runAutoPush('kanban');
+    }, AUTO_SAVE_DELAY_MS);
+  } else {
+    if (planAutoSaveTimer !== null) clearTimeout(planAutoSaveTimer);
+    planAutoSaveTimer = setTimeout(() => {
+      planAutoSaveTimer = null;
+      runAutoPush('plan');
+    }, AUTO_SAVE_DELAY_MS);
+  }
+
+  updateCloudStatusIndicator();
+}
+
+function flushPendingAutoPushKeepalive() {
+  if (!hasCloudToken() || !isAutoSyncEnabled() || storageBlocked || busy) return;
+
+  let hadPendingPlan = false;
+  let hadPendingKanban = false;
+
+  if (planAutoSaveTimer !== null) {
+    clearTimeout(planAutoSaveTimer);
+    planAutoSaveTimer = null;
+    hadPendingPlan = true;
+  }
+  if (kanbanAutoSaveTimer !== null) {
+    clearTimeout(kanbanAutoSaveTimer);
+    kanbanAutoSaveTimer = null;
+    hadPendingKanban = true;
+  }
+
+  if ((hadPendingPlan || state.dirty) && state.dirty) {
+    runAutoPush('plan', { keepalive: true });
+  }
+  if ((hadPendingKanban || kanbanState.dirty) && kanbanState.dirty) {
+    runAutoPush('kanban', { keepalive: true });
+  }
+}
+
+async function autoPullFromCloud(isInitial = false) {
+  if (!hasCloudToken() || !isAutoSyncEnabled() || busy || autoSyncInFlight > 0 || storageBlocked) {
+    updateCloudStatusIndicator();
+    return;
+  }
+  if (!isInitial && Date.now() - lastAutoPullAt < AUTO_PULL_COOLDOWN_MS) {
+    return;
+  }
+
+  lastAutoPullAt = Date.now();
+  const token = (localStorage.getItem(TOKEN_KEY) || '').trim();
+  const planId = getActivePlanId();
+  const kanbanId = getActiveKanbanId();
+
+  autoSyncInFlight++;
+  updateCloudStatusIndicator();
+
+  try {
+    let pulledPlan = false;
+    let pulledKanban = false;
+
+    if (state.dirty) {
+      scheduleAutoPush('plan');
+    } else {
+      const planData = await callApiSilent('pull', token, planId, 'plan');
+      if (planData.etag !== null && planData.etag !== state.etag) {
+        const validated = validatePlan(planData.plan);
+        const next = { plan: validated, etag: planData.etag, dirty: false };
+        persist(next);
+        render();
+        renderKanbanBadge();
+        pulledPlan = true;
+      } else if (
+        planData.etag === null &&
+        (state.plan.events.length > 0 || state.plan.subjects.length > 0 || (state.plan.academicYear?.specialDays?.length || 0) > 0)
+      ) {
+        const next = clone(state);
+        next.dirty = true;
+        persist(next);
+        scheduleAutoPush('plan');
+      }
+    }
+
+    if (kanbanState.dirty) {
+      scheduleAutoPush('kanban');
+    } else {
+      const kanbanData = await callApiSilent('pull', token, kanbanId, 'kanban');
+      if (kanbanData.etag !== null && kanbanData.etag !== kanbanState.etag) {
+        const validated = validateKanban(kanbanData.kanban);
+        const next = { kanban: validated, etag: kanbanData.etag, dirty: false };
+        persistKanban(next);
+        renderKanban();
+        pulledKanban = true;
+      } else if (kanbanData.etag === null && kanbanState.kanban.cards.length > 0) {
+        const next = clone(kanbanState);
+        next.dirty = true;
+        persistKanban(next);
+        scheduleAutoPush('kanban');
+      }
+    }
+
+    const timeLabel = new Date().toLocaleTimeString('pl-PL');
+    cloudSyncState = 'synced';
+    cloudSyncDetail = timeLabel;
+    if (pulledPlan || pulledKanban) {
+      const updatedParts = [];
+      if (pulledPlan) updatedParts.push('plan zajęć');
+      if (pulledKanban) updatedParts.push('tablicę Kanban');
+      setStatus(`Auto-synchronizacja: pobrano z chmury (${updatedParts.join(' i ')}) · ${timeLabel}.`);
+    }
+  } catch (err) {
+    cloudSyncState = 'error';
+    cloudSyncDetail = err.message;
+  } finally {
+    autoSyncInFlight = Math.max(0, autoSyncInFlight - 1);
+    updateCloudStatusIndicator();
+  }
 }
 
 /** Wysyła żądanie do Workera (/api/plan lub /api/kanban). direction: 'pull' (GET) lub 'push' (PUT). */
@@ -3345,23 +3683,39 @@ async function sync(direction) {
     const data = await callApi(direction, token, activeId, target);
 
     if (isKanban) {
+      if (kanbanAutoSaveTimer !== null) {
+        clearTimeout(kanbanAutoSaveTimer);
+        kanbanAutoSaveTimer = null;
+      }
       const next = clone(kanbanState);
       if (direction === 'pull') next.kanban = validateKanban(data.kanban);
       next.etag = data.etag;
       next.dirty = false;
       persistKanban(next);
       renderKanban();
-      setStatus(`Zsynchronizowano tablicę Kanban (${fileKey}) · ${new Date().toLocaleTimeString('pl-PL')}.`);
+      const timeLabel = new Date().toLocaleTimeString('pl-PL');
+      cloudSyncState = 'synced';
+      cloudSyncDetail = timeLabel;
+      setStatus(`Zsynchronizowano tablicę Kanban (${fileKey}) · ${timeLabel}.`);
     } else {
+      if (planAutoSaveTimer !== null) {
+        clearTimeout(planAutoSaveTimer);
+        planAutoSaveTimer = null;
+      }
       const next = clone(state);
       if (direction === 'pull') next.plan = validatePlan(data.plan);
       next.etag = data.etag;
       next.dirty = false;
       persist(next);
       render();
-      setStatus(`Zsynchronizowano plan (${fileKey}) · ${new Date().toLocaleTimeString('pl-PL')}.`);
+      const timeLabel = new Date().toLocaleTimeString('pl-PL');
+      cloudSyncState = 'synced';
+      cloudSyncDetail = timeLabel;
+      setStatus(`Zsynchronizowano plan zajęć (${fileKey}) · ${timeLabel}.`);
     }
   } catch (err) {
+    cloudSyncState = 'error';
+    cloudSyncDetail = err.message;
     if (err.name === 'TimeoutError') {
       setStatus('Przekroczono czas połączenia. Dane lokalne pozostały bez zmian.');
     } else {
@@ -3370,6 +3724,7 @@ async function sync(direction) {
   } finally {
     busy = false;
     setButtonsDisabled(false);
+    updateCloudStatusIndicator();
   }
 }
 
@@ -3378,6 +3733,16 @@ async function sync(direction) {
 function bindEvents() {
   $('tabCalendar').onclick = () => setActiveView('calendar');
   $('tabKanban').onclick = () => setActiveView('kanban');
+  $('cloudStatusBadge').onclick = () => {
+    setMobileMenuOpen(false);
+    openConnectionDialog();
+  };
+  $('liveClockBadge').onclick = () => {
+    const t = today();
+    if (activeView !== 'calendar') setActiveView('calendar');
+    selectedDayIndex = weekdayIndex(t);
+    showWeek(monday(t));
+  };
 
   $('menuToggle').onclick = () => {
     const isOpen = $('navPanel').classList.contains('open');
@@ -3630,10 +3995,27 @@ function bindEvents() {
     { passive: true },
   );
 
-  // Odświeżanie na żywo paska aktualnej godziny (bez przeładowywania strony)
+  // Odświeżanie na żywo zegara i paska aktualnej godziny + auto-synchronizacja w tle
   setInterval(updateLiveTimeIndicator, 10_000);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) updateLiveTimeIndicator();
+    if (document.hidden) {
+      flushPendingAutoPushKeepalive();
+    } else {
+      updateLiveTimeIndicator();
+      autoPullFromCloud(false);
+    }
+  });
+  window.addEventListener('pagehide', () => {
+    flushPendingAutoPushKeepalive();
+  });
+  window.addEventListener('beforeunload', (e) => {
+    if (planAutoSaveTimer !== null || kanbanAutoSaveTimer !== null || state.dirty || kanbanState.dirty) {
+      flushPendingAutoPushKeepalive();
+    }
+    if (autoSyncInFlight > 0) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
   });
   window.addEventListener('resize', () => {
     requestAnimationFrame(refreshSpecialDayMarquees);
@@ -3676,3 +4058,4 @@ updateConnectionButtonLabel();
 renderKanbanBadge();
 setEditMode(false);
 reportState();
+autoPullFromCloud(true);

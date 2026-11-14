@@ -13,27 +13,32 @@
 
   <body>
     <header>
-      <div class="brand-wrap">
-        <div class="brand">
-          <h1 id="appHeading">Plan zajęć<span>.</span></h1>
-        </div>
-        <nav class="view-tabs" aria-label="Widoki aplikacji">
-          <button type="button" id="tabCalendar" class="view-tab active" aria-selected="true">
-            <i class="ph ph-calendar-dots"></i>
-            <span>Kalendarz</span>
-          </button>
-          <button type="button" id="tabKanban" class="view-tab" aria-selected="false">
-            <i class="ph ph-kanban"></i>
-            <span>Tablica Kanban</span>
-            <span id="kanbanCountBadge" class="tab-badge" hidden>0</span>
-          </button>
-        </nav>
+      <div class="brand">
+        <h1 id="appHeading">Plan zajęć<span>.</span></h1>
       </div>
+      <nav class="view-tabs" aria-label="Widoki aplikacji">
+        <button type="button" id="tabCalendar" class="view-tab active" aria-selected="true">
+          <i class="ph ph-calendar-dots"></i>
+          <span>Plan zajęć</span>
+        </button>
+        <button type="button" id="tabKanban" class="view-tab" aria-selected="false">
+          <i class="ph ph-kanban"></i>
+          <span>Tablica Kanban</span>
+          <span id="kanbanCountBadge" class="tab-badge" hidden>0</span>
+        </button>
+      </nav>
       <div class="actions header-actions">
-        <div id="liveClockBadge" class="live-clock-badge" title="Aktualna godzina (na żywo)">
-          <span class="live-clock-dot"></span>
-          <span id="liveClockText">--:--</span>
-        </div>
+        <button
+          type="button"
+          id="cloudStatusBadge"
+          class="cloud-status-badge"
+          data-state="unconfigured"
+          title="Status synchronizacji z chmurą (kliknij, aby otworzyć ustawienia chmury)"
+        >
+          <span class="cloud-status-dot"></span>
+          <i class="ph ph-cloud"></i>
+          <span id="cloudStatusText" class="cloud-status-text">Chmura</span>
+        </button>
         <button type="button" id="themeToggle" class="desktop-only"><i class="ph ph-circle-half"></i> Auto</button>
         <button type="button" id="editModeToggle" aria-pressed="false">
           <i class="ph ph-pencil-simple"></i> <span class="btn-label">Tryb edycji: Wył.</span>
@@ -90,11 +95,11 @@
         <p id="status" class="status" role="status" aria-live="polite"></p>
       </div>
 
-      <!-- WIDOK 1: KALENDARZ TYGODNIOWY -->
+      <!-- WIDOK 1: PLAN ZAJĘĆ -->
       <div id="calendarView">
         <section class="weekbar">
           <div class="weekbar-info">
-            <span class="eyebrow">KALENDARZ TYGODNIOWY</span>
+            <span class="eyebrow">PLAN ZAJĘĆ · WIDOK TYGODNIOWY</span>
             <h2 id="weekTitle"></h2>
             <p id="summary"></p>
           </div>
@@ -116,7 +121,7 @@
         </div>
 
         <p id="calendarHint" class="hint">
-          Kliknij zajęcia, aby zobaczyć szczegóły przedmiotu i spotkania. Włącz „Tryb edycji” u góry, aby dodawać lub zmieniać zajęcia w kalendarzu.
+          Kliknij zajęcia, aby zobaczyć szczegóły przedmiotu i spotkania. Włącz „Tryb edycji” u góry, aby dodawać lub zmieniać zajęcia w planie zajęć.
         </p>
       </div>
 
@@ -427,7 +432,7 @@
       </div>
 
       <div class="bulk-section">
-        <h3>3. Wyczyść kalendarz</h3>
+        <h3>3. Wyczyść plan zajęć</h3>
         <p class="hint">
           Po wyczyszczeniu kliknij „Zapisz w chmurze” na pasku narzędzi, aby nadpisać i wyczyścić również plan w chmurze Cloudflare R2.
         </p>
@@ -436,7 +441,7 @@
             <i class="ph ph-calendar-x"></i> Usuń wszystkie zajęcia (zostaw przedmioty i strukturę roku)
           </button>
           <button type="button" id="clearAllBtn" class="danger">
-            <i class="ph ph-trash"></i> Wyczyść cały kalendarz do zera
+            <i class="ph ph-trash"></i> Wyczyść cały plan zajęć do zera
           </button>
         </div>
       </div>
@@ -489,6 +494,11 @@
         <p class="hint">
           Klucz oraz nazwy plików zostaną zapisane w tej przeglądarce. Puste pole klucza usuwa zapisany klucz.
         </p>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="autoSyncEnabled" checked>
+          <span><i class="ph ph-arrows-clockwise"></i> Automatyczna synchronizacja (pobieraj przy wejściu i zapisuj zmiany w tle po 2,5 s)</span>
+        </label>
 
         <p id="connectionError" class="error" role="alert"></p>
 
@@ -763,5 +773,17 @@
         <p id="kanbanColumnsError" class="error" role="alert"></p>
       </form>
     </dialog>
+
+    <button
+      type="button"
+      id="liveClockBadge"
+      class="live-clock-badge floating-clock"
+      title="Aktualna data i godzina na żywo — kliknij, aby przejść do dzisiejszego dnia w planie zajęć"
+    >
+      <span class="live-clock-dot"></span>
+      <span id="liveClockDate" class="live-clock-date">---</span>
+      <span class="live-clock-sep">·</span>
+      <span id="liveClockText">--:--</span>
+    </button>
   </body>
 </html>
