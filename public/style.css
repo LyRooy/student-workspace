@@ -979,7 +979,7 @@ textarea { min-height: 70px; resize: vertical; }
   .toolbar .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; width: 100%; }
   .toolbar .actions button, .toolbar-dropdown-btn { width: 100%; justify-content: flex-start; padding: 9px 10px; font-size: 12px; }
   .toolbar-dropdown { width: 100%; }
-  .toolbar-dropdown[open] { grid-column: 1 / -1; }
+  .toolbar-dropdown[open], .toolbar-right > .toolbar-dropdown { grid-column: 1 / -1; }
   .toolbar-dropdown-btn .dropdown-caret { margin-left: auto; }
   .toolbar-dropdown-menu { position: static; margin-top: 5px; width: 100%; box-shadow: none; background: var(--soft); }
   .status { margin: 10px 0 0; padding: 8px 10px; min-height: 0; font-size: 11px; overflow-wrap: anywhere; }

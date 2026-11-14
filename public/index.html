@@ -30,14 +30,14 @@
       <div class="actions header-actions">
         <button
           type="button"
-          id="cloudStatusBadge"
-          class="cloud-status-badge"
+          id="cloudStatusBadgeMobile"
+          class="cloud-status-badge mobile-only"
           data-state="unconfigured"
+          aria-label="Status synchronizacji z chmurą"
           title="Status synchronizacji z chmurą (kliknij, aby otworzyć ustawienia chmury)"
         >
           <span class="cloud-status-dot"></span>
           <i class="ph ph-cloud"></i>
-          <span id="cloudStatusText" class="cloud-status-text">Chmura</span>
         </button>
         <button type="button" id="themeToggle" class="desktop-only"><i class="ph ph-circle-half"></i> Auto</button>
         <button type="button" id="editModeToggle" aria-pressed="false">
@@ -98,6 +98,17 @@
             </details>
           </div>
           <div class="actions toolbar-right">
+            <button
+              type="button"
+              id="cloudStatusBadge"
+              class="cloud-status-badge desktop-only"
+              data-state="unconfigured"
+              title="Status synchronizacji z chmurą (kliknij, aby otworzyć ustawienia chmury)"
+            >
+              <span class="cloud-status-dot"></span>
+              <i class="ph ph-cloud"></i>
+              <span id="cloudStatusText" class="cloud-status-text">Chmura</span>
+            </button>
             <details id="cloudDropdown" class="toolbar-dropdown">
               <summary class="toolbar-dropdown-btn">
                 <i class="ph ph-cloud-arrow-up"></i> <span>Chmura</span> <i class="ph ph-caret-down dropdown-caret"></i>

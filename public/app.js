@@ -2375,9 +2375,12 @@ function updateCloudStatusIndicator(stateOverride = null, detailOverride = null)
     title = 'Automatyczna synchronizacja wyłączona — brak niezapisanych zmian';
   }
 
-  badge.dataset.state = effectiveState;
+  for (const el of [$('cloudStatusBadge'), $('cloudStatusBadgeMobile')]) {
+    if (!el) continue;
+    el.dataset.state = effectiveState;
+    el.title = title;
+  }
   labelEl.textContent = text;
-  badge.title = title;
 }
 
 function openConnectionDialog() {
@@ -2698,6 +2701,7 @@ function bindEvents() {
   $('tabCalendar').onclick = () => setActiveView('calendar');
   $('tabKanban').onclick = () => setActiveView('kanban');
   $('cloudStatusBadge').onclick = closeAnd(openConnectionDialog);
+  $('cloudStatusBadgeMobile').onclick = closeAnd(openConnectionDialog);
   $('liveClockBadge').onclick = () => {
     const t = today();
     if (activeView !== 'calendar') setActiveView('calendar');
