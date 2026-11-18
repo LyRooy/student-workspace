@@ -51,12 +51,12 @@ Pasek narzędzi pod nagłówkiem (na telefonie rozwijany przyciskiem **Menu**) g
   - Dynamiczny licznik otwartych zadań w plakietce zakładki `Tablica Kanban`, filtrowanie po przedmiocie/priorytecie i wyszukiwarka tekstowa.
   - Na telefonie pasek zakładek kolumn oraz przełączanie kolumn gestem swipe.
 - **Zadania studenckie**:
-  - Tytuł zadania, powiązanie z przedmiotem z planu zajęć (lub własny projekt), kategoria, termin wykonania (deadline z ostrzeżeniami o zbliżającym się lub przekroczonym terminie), priorytet (*Niski*, *Średni*, *Wysoki*), opis/notatki oraz **lista podzadań (checklista)** z paskiem postępu.
+  - Tytuł zadania, powiązanie z przedmiotem z planu zajęć (lub własny projekt), kategoria, termin wykonania (deadline z ostrzeżeniami o zbliżającym się lub przekroczonym terminie), priorytet (*Niski*, *Średni*, *Wysoki*), opis/notatki oraz **pełna lista podzadań (checklista)** z paskiem postępu, rozciągająca wysokość karty i z możliwością **zmiany kolejności (przeciąganie / przyciski góra–dół)**.
   - Wzbogacony podgląd notatek z klikalnymi linkami i wygodnym kopiowaniem treści.
 - **Wygodna obsługa zawsze pod ręką**:
-  - Przeciąganie kart między kolumnami (**Drag & Drop**), szybkie przenoszenie przyciskami strzałek oraz **odhaczanie podzadań na checklistach działają zawsze** — również przy wyłączonym `Tryb edycji`.
+  - Przeciąganie kart między kolumnami (**Drag & Drop**), szybkie przenoszenie przyciskami strzałek oraz **odhaczanie i przesuwanie podzadań na checklistach działają zawsze** — również przy wyłączonym `Tryb edycji`.
 - **Automatyczne archiwum ukończonych zadań**:
-  - Zadania przeniesione do ostatniej kolumny (**Zrobione**) automatycznie przechodzą po **7 dniach** od ukończenia do wbudowanego **Archiwum** (z licznikiem i możliwością podglądu notatek, przywrócenia na tablicę lub trwałego usunięcia).
+  - Zadania przeniesione do ostatniej kolumny (**Zrobione**) automatycznie przechodzą po **7 dniach** od ukończenia do wbudowanego **Archiwum** i są w nim przechowywane przez **30 dni**, po czym zostają automatycznie usunięte. W każdej chwili możesz podejrzeć ich notatki, przywrócić je na tablicę lub usunąć wcześniej.
 - **Tryb edycji w Kanbanie**:
   - Gdy `Tryb edycji` jest wyłączony, kliknięcie w kartę otwiera modal podglądu szczegółów (z kopiowaniem i odhaczaniem checklisty) bez ryzyka przypadkowej edycji treści czy usunięcia zadania.
   - Włączenie `Tryb edycji` odblokowuje dodawanie nowych kart (`Dodaj zadanie` oraz przyciski `+` w kolumnach), edycję i usuwanie zadań oraz menu `Zarządzaj tablicą` (`Kolumny`, `Wyczyść „Zrobione”`, `Resetuj tablicę`).

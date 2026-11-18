@@ -11,6 +11,7 @@ import {
   emptyKanban,
   validateKanban,
   resolveKanbanKey,
+  KANBAN_ARCHIVE_RETENTION_DAYS,
   reconcileKanbanArchive,
 } from '../public/model.js';
 import worker from '../worker.js';
@@ -469,7 +470,7 @@ test('archiwizacja zadań Kanban po 7 dniach i uzupełnianie completedAt', () =>
   );
 
   const res = reconcileKanbanArchive(board, '2026-11-14');
-  assert.deepEqual(res, { changed: true, archivedCount: 1, stampedCount: 1 });
+  assert.deepEqual(res, { changed: true, archivedCount: 1, stampedCount: 1, deletedCount: 0 });
   assert.equal(validateKanban(board).cards.length, 4);
 
   const byId = Object.fromEntries(board.cards.map((c) => [c.id, c]));
@@ -480,11 +481,29 @@ test('archiwizacja zadań Kanban po 7 dniach i uzupełnianie completedAt', () =>
   assert.equal(byId.todo_stale_field.completedAt, undefined);
 
   // Ponowne uruchomienie tego samego dnia nie wprowadza już żadnych zmian
-  assert.deepEqual(reconcileKanbanArchive(board, '2026-11-14'), { changed: false, archivedCount: 0, stampedCount: 0 });
+  assert.deepEqual(reconcileKanbanArchive(board, '2026-11-14'), { changed: false, archivedCount: 0, stampedCount: 0, deletedCount: 0 });
 
   // Po upływie 7 dni od nadania dzisiejszej daty (2026-11-21) zadanie bez wcześniejszej daty też trafia do archiwum
   const weekLater = reconcileKanbanArchive(board, '2026-11-21');
   assert.equal(weekLater.archivedCount, 2);
+  assert.equal(weekLater.deletedCount, 0);
   assert.equal(byId.fresh_done.archivedAt, '2026-11-21');
   assert.equal(byId.legacy_done.archivedAt, '2026-11-21');
+
+  // Zadania w archiwum pozostają przed upływem 30 dni, a po 30 dniach są trwale usuwane
+  assert.equal(KANBAN_ARCHIVE_RETENTION_DAYS, 30);
+  const beforeExpiry = reconcileKanbanArchive(board, '2026-12-13');
+  assert.deepEqual(beforeExpiry, { changed: false, archivedCount: 0, stampedCount: 0, deletedCount: 0 });
+  assert.equal(board.cards.length, 4);
+
+  const atFirstExpiry = reconcileKanbanArchive(board, '2026-12-14');
+  assert.equal(atFirstExpiry.changed, true);
+  assert.equal(atFirstExpiry.deletedCount, 1);
+  assert.equal(board.cards.some((c) => c.id === 'old_done'), false);
+  assert.equal(board.cards.length, 3);
+
+  const atSecondExpiry = reconcileKanbanArchive(board, '2026-12-21');
+  assert.equal(atSecondExpiry.changed, true);
+  assert.equal(atSecondExpiry.deletedCount, 2);
+  assert.deepEqual(board.cards.map((c) => c.id), ['todo_stale_field']);
 });

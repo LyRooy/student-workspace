@@ -14,6 +14,7 @@ import {
   validateKanban,
   resolveKanbanKey,
   KANBAN_ARCHIVE_AFTER_DAYS,
+  KANBAN_ARCHIVE_RETENTION_DAYS,
   reconcileKanbanArchive,
 } from './model.js';
 
@@ -93,6 +94,7 @@ let draftChecklist = [];
 let selectedKanbanColIndex = 0;
 let kanbanMobileSlideDir = '';
 let draggedKanbanCardId = null;
+let draggedSubtask = null;
 let week = monday(today());
 let selectedDayIndex = weekdayIndex(today());
 let mobileSlideDir = '';
@@ -973,7 +975,7 @@ function renderEvent(event, layout, gridStartMin, specialDay = null) {
   const cancelledByRector = isEventCancelledByRector(event, specialDay);
 
   const INSET = 1;
-  const sizeClass = durationMin < 20 ? 'compact' : durationMin <= 40 ? 'short-block' : durationMin <= 55 ? 'medium-block' : 'tall-block';
+  const sizeClass = durationMin <= 10 ? 'micro-block' : durationMin <= 20 ? 'compact' : durationMin <= 35 ? 'short-block' : durationMin <= 55 ? 'medium-block' : 'tall-block';
   const className = [
     'event',
     typeVisual.variant,
@@ -998,15 +1000,19 @@ function renderEvent(event, layout, gridStartMin, specialDay = null) {
 
   const topRow = node('div', 'event-top-row');
   topRow.append(node('span', 'time', `${event.start} – ${event.end}`));
-  if (cancelledByRector) topRow.append(iconTag('rector-tag', 'ph-graduation-cap', 'Odwołane'));
-  if (isCustom) topRow.append(iconTag('custom-tag', 'ph-star-four', 'Własne'));
-  if (event.remote) topRow.append(iconTag('remote-tag', 'ph-laptop', 'Zdalnie'));
+  if (durationMin > 10) {
+    if (cancelledByRector) topRow.append(iconTag('rector-tag', 'ph-graduation-cap', 'Odwołane'));
+    if (isCustom) topRow.append(iconTag('custom-tag', 'ph-star-four', 'Własne'));
+    if (event.remote) topRow.append(iconTag('remote-tag', 'ph-laptop', 'Zdalnie'));
+  }
 
   button.append(topRow, node('span', 'name', title));
-  if (event.room || event.teacher) button.append(node('span', 'meta', [event.room, event.teacher].filter(Boolean).join(' · ')));
-  button.append(iconTag(`type-tag ${typeVisual.variant}`, typeVisual.icon, event.type));
-  if (overlaps) button.append(node('span', 'meta', '⚠ Nakładające się godziny'));
-  if (event.notes) button.append(node('span', 'meta', event.notes));
+  if (durationMin > 30 && (event.room || event.teacher)) button.append(node('span', 'meta', [event.room, event.teacher].filter(Boolean).join(' · ')));
+  if (durationMin > 20) button.append(iconTag(`type-tag ${typeVisual.variant}`, typeVisual.icon, event.type));
+  if (durationMin > 45) {
+    if (overlaps) button.append(node('span', 'meta', '⚠ Nakładające się godziny'));
+    if (event.notes) button.append(node('span', 'meta', event.notes));
+  }
 
   button.onclick = (e) => {
     e.stopPropagation();
@@ -1637,8 +1643,12 @@ function syncKanbanArchiveState({ notify = false } = {}) {
   if ($('kanbanArchiveDialog')?.open) renderKanbanArchiveList();
   reportState();
   scheduleAutoPush('kanban');
-  if (notify && res.archivedCount > 0) {
-    setStatus(`Przeniesiono automatycznie do archiwum ${res.archivedCount} ukończonych zadań (starszych niż ${KANBAN_ARCHIVE_AFTER_DAYS} dni).`);
+  if (notify && (res.archivedCount > 0 || res.deletedCount > 0)) {
+    const msgs = [];
+    if (res.archivedCount > 0) msgs.push(`przeniesiono automatycznie do archiwum ${res.archivedCount} ukończonych zadań (starszych niż ${KANBAN_ARCHIVE_AFTER_DAYS} dni)`);
+    if (res.deletedCount > 0) msgs.push(`usunięto trwale z archiwum ${res.deletedCount} zadań starszych niż ${KANBAN_ARCHIVE_RETENTION_DAYS} dni`);
+    const summary = msgs.join(' oraz ');
+    setStatus(summary.charAt(0).toUpperCase() + summary.slice(1) + '.');
   }
   return true;
 }
@@ -1752,11 +1762,103 @@ function toggleKanbanChecklistItem(cardId, itemId) {
   });
 }
 
-function buildChecklistItems(checklist, onToggle) {
+function moveKanbanChecklistItem(cardId, fromIndex, toIndex) {
+  mutateKanban((kanban) => {
+    const list = kanban.cards.find((c) => c.id === cardId)?.checklist;
+    if (!list || fromIndex < 0 || fromIndex >= list.length) return;
+    const clampedTo = Math.max(0, Math.min(list.length - 1, toIndex));
+    if (fromIndex === clampedTo) return;
+    const [moved] = list.splice(fromIndex, 1);
+    list.splice(clampedTo, 0, moved);
+  });
+}
+
+function clearSubtaskDragClasses() {
+  for (const el of document.querySelectorAll('.drag-over-top, .drag-over-bottom')) {
+    el.classList.remove('drag-over-top', 'drag-over-bottom');
+  }
+}
+
+function attachSubtaskDrag(row, list, idx, onMove, gripEl = null) {
+  if (gripEl) {
+    gripEl.addEventListener('mouseenter', () => { row.draggable = true; });
+    gripEl.addEventListener('mousedown', () => { row.draggable = true; });
+    gripEl.addEventListener('mouseleave', () => { if (!draggedSubtask) row.draggable = false; });
+  } else {
+    row.draggable = true;
+  }
+
+  row.addEventListener('dragstart', (e) => {
+    if (!gripEl && e.target?.closest?.('input, button')) {
+      e.preventDefault();
+      return;
+    }
+    e.stopPropagation();
+    draggedSubtask = { list, index: idx };
+    row.classList.add('dragging-subtask');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(idx));
+    }
+  });
+
+  row.addEventListener('dragover', (e) => {
+    if (!draggedSubtask || draggedSubtask.list !== list) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    if (draggedSubtask.index === idx) {
+      row.classList.remove('drag-over-top', 'drag-over-bottom');
+      return;
+    }
+    const rect = row.getBoundingClientRect();
+    const insertAfter = e.clientY >= rect.top + rect.height / 2;
+    row.classList.toggle('drag-over-top', !insertAfter);
+    row.classList.toggle('drag-over-bottom', insertAfter);
+  });
+
+  row.addEventListener('dragleave', (e) => {
+    if (!row.contains(e.relatedTarget)) row.classList.remove('drag-over-top', 'drag-over-bottom');
+  });
+
+  row.addEventListener('drop', (e) => {
+    if (!draggedSubtask || draggedSubtask.list !== list) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const fromIdx = draggedSubtask.index;
+    const rect = row.getBoundingClientRect();
+    let targetIdx = e.clientY >= rect.top + rect.height / 2 ? idx + 1 : idx;
+    if (fromIdx < targetIdx) targetIdx--;
+    draggedSubtask = null;
+    if (gripEl) row.draggable = false;
+    clearSubtaskDragClasses();
+    if (fromIdx !== targetIdx) onMove(fromIdx, targetIdx);
+  });
+
+  row.addEventListener('dragend', () => {
+    draggedSubtask = null;
+    row.classList.remove('dragging-subtask');
+    if (gripEl) row.draggable = false;
+    clearSubtaskDragClasses();
+  });
+}
+
+function buildChecklistItems(checklist, onToggle, onMove = null) {
   const frag = document.createDocumentFragment();
-  for (const item of checklist) {
-    const row = node('label', `kanban-card-checkitem${item.done ? ' done' : ''}`);
+  const canMove = typeof onMove === 'function' && checklist.length > 1;
+  checklist.forEach((item, idx) => {
+    const row = node('div', `kanban-card-checkitem${item.done ? ' done' : ''}`);
     row.onclick = (e) => e.stopPropagation();
+
+    if (canMove) {
+      const grip = node('span', 'kanban-subtask-grip');
+      grip.title = 'Przeciągnij, aby zmienić kolejność podzadania';
+      grip.innerHTML = '<i class="ph ph-dots-six-vertical"></i>';
+      row.append(grip);
+      attachSubtaskDrag(row, checklist, idx, onMove);
+    }
+
+    const label = node('label', 'kanban-checkitem-label');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = item.done;
@@ -1764,9 +1866,28 @@ function buildChecklistItems(checklist, onToggle) {
       e.stopPropagation();
       onToggle(item);
     };
-    row.append(cb, node('span', '', item.text));
+    label.append(cb, node('span', '', item.text));
+    row.append(label);
+
+    if (canMove) {
+      const moveBtns = node('span', 'kanban-subtask-move');
+      if (idx > 0) {
+        moveBtns.append(iconBtn('kanban-subtask-btn', 'ph-caret-up', 'Przesuń wyżej', (e) => {
+          e.stopPropagation();
+          onMove(idx, idx - 1);
+        }));
+      }
+      if (idx < checklist.length - 1) {
+        moveBtns.append(iconBtn('kanban-subtask-btn', 'ph-caret-down', 'Przesuń niżej', (e) => {
+          e.stopPropagation();
+          onMove(idx, idx + 1);
+        }));
+      }
+      row.append(moveBtns);
+    }
+
     frag.append(row);
-  }
+  });
   return frag;
 }
 
@@ -1809,13 +1930,29 @@ function openKanbanDetailsDialog(cardId) {
   if (hasCheck) {
     const doneCount = card.checklist.filter((i) => i.done).length;
     $('kanbanDetailsChecklistHead').textContent = `Lista podzadań (${doneCount}/${card.checklist.length})`;
-    checkContainer.append(buildChecklistItems(card.checklist, (item) => {
-      toggleKanbanChecklistItem(card.id, item.id);
-      openKanbanDetailsDialog(card.id);
-    }));
+    checkContainer.append(buildChecklistItems(
+      card.checklist,
+      (item) => {
+        toggleKanbanChecklistItem(card.id, item.id);
+        openKanbanDetailsDialog(card.id);
+      },
+      archived
+        ? null
+        : (fromIdx, toIdx) => {
+            moveKanbanChecklistItem(card.id, fromIdx, toIdx);
+            openKanbanDetailsDialog(card.id);
+          },
+    ));
   }
 
-  $('kanbanDetailsEditBtn').hidden = !editMode;
+  $('kanbanDetailsEditBtn').hidden = !editMode || archived;
+  $('kanbanDetailsRestoreBtn').hidden = !archived;
+  $('kanbanDetailsDeleteArchiveBtn').hidden = !archived;
+  $('kanbanDetailsRestoreBtn').onclick = () => {
+    $('kanbanDetailsDialog').close();
+    restoreKanbanCardFromArchive(card.id);
+  };
+  $('kanbanDetailsDeleteArchiveBtn').onclick = () => deleteArchivedKanbanCard(card.id);
   showDialogModal($('kanbanDetailsDialog'));
 }
 
@@ -1915,7 +2052,11 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     progressHead.append(checkLabel, progressBar, node('span', 'kanban-check-pct', `${pct}%`));
 
     const listEl = node('div', 'kanban-card-checkitems');
-    listEl.append(buildChecklistItems(card.checklist, (item) => toggleKanbanChecklistItem(card.id, item.id)));
+    listEl.append(buildChecklistItems(
+      card.checklist,
+      (item) => toggleKanbanChecklistItem(card.id, item.id),
+      (fromIdx, toIdx) => moveKanbanChecklistItem(card.id, fromIdx, toIdx),
+    ));
     checkWrap.append(progressHead, listEl);
     el.append(checkWrap);
   }
@@ -2010,9 +2151,15 @@ function renderKanban() {
     colEl.append(head);
 
     const cardsContainer = node('div', 'kanban-cards');
-    colEl.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; colEl.classList.add('drag-over'); });
+    colEl.addEventListener('dragover', (e) => {
+      if (!draggedKanbanCardId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      colEl.classList.add('drag-over');
+    });
     colEl.addEventListener('dragleave', (e) => { if (!colEl.contains(e.relatedTarget)) colEl.classList.remove('drag-over'); });
     colEl.addEventListener('drop', (e) => {
+      if (!draggedKanbanCardId) return;
       e.preventDefault();
       colEl.classList.remove('drag-over');
       const cardId = draggedKanbanCardId || e.dataTransfer.getData('text/plain');
@@ -2076,8 +2223,24 @@ function populateKanbanCardFormSelects(selectedSubject = '', selectedCategory = 
 function renderDraftChecklist() {
   const container = $('kanbanChecklistItems');
   container.replaceChildren();
+  const moveDraftItem = (fromIdx, toIdx) => {
+    const clampedTo = Math.max(0, Math.min(draftChecklist.length - 1, toIdx));
+    if (fromIdx === clampedTo) return;
+    const [moved] = draftChecklist.splice(fromIdx, 1);
+    draftChecklist.splice(clampedTo, 0, moved);
+    renderDraftChecklist();
+  };
+
   draftChecklist.forEach((item, idx) => {
     const row = node('div', 'kanban-draft-checkrow');
+    if (draftChecklist.length > 1) {
+      const grip = node('span', 'kanban-subtask-grip');
+      grip.title = 'Przeciągnij, aby zmienić kolejność podzadania';
+      grip.innerHTML = '<i class="ph ph-dots-six-vertical"></i>';
+      row.append(grip);
+      attachSubtaskDrag(row, draftChecklist, idx, moveDraftItem, grip);
+    }
+
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = item.done;
@@ -2088,12 +2251,16 @@ function renderDraftChecklist() {
     textInput.value = item.text;
     textInput.maxLength = 200;
     textInput.oninput = () => { item.text = textInput.value; };
+    row.append(cb, textInput);
+
+    if (idx > 0) row.append(iconBtn('kanban-icon-btn', 'ph-arrow-up', 'Przesuń wyżej', () => moveDraftItem(idx, idx - 1)));
+    if (idx < draftChecklist.length - 1) row.append(iconBtn('kanban-icon-btn', 'ph-arrow-down', 'Przesuń niżej', () => moveDraftItem(idx, idx + 1)));
 
     const removeBtn = iconBtn('danger kanban-icon-btn', 'ph-x', 'Usuń podpunkt', () => {
       draftChecklist.splice(idx, 1);
       renderDraftChecklist();
     });
-    row.append(cb, textInput, removeBtn);
+    row.append(removeBtn);
     container.append(row);
   });
 }
@@ -2361,7 +2528,9 @@ function restoreKanbanCardFromArchive(cardId) {
 function deleteArchivedKanbanCard(cardId) {
   if (!confirm('Czy na pewno trwale usunąć to zarchiwizowane zadanie?')) return;
   mutateKanban((kanban) => { kanban.cards = kanban.cards.filter((c) => c.id !== cardId); });
+  if (detailsKanbanCardId === cardId && $('kanbanDetailsDialog')?.open) $('kanbanDetailsDialog').close();
   renderKanbanArchiveList();
+  setStatus('Zadanie zostało trwale usunięte z archiwum.');
 }
 
 function clearKanbanArchive() {
@@ -2395,12 +2564,21 @@ function renderKanbanArchiveList() {
   for (const card of filtered) {
     const row = node('div', 'archive-row');
     const info = node('div', 'archive-row-info');
-    info.append(node('div', 'archive-row-title', card.title));
+    const titleBtn = node('button', 'archive-row-title-btn', card.title);
+    titleBtn.type = 'button';
+    titleBtn.title = 'Otwórz szczegóły zadania';
+    titleBtn.onclick = () => openKanbanDetailsDialog(card.id);
+    info.append(titleBtn);
+
+    const archivedDate = card.archivedAt || today();
+    const elapsedArchiveDays = Math.max(0, Math.round((Date.parse(today() + 'T12:00:00Z') - Date.parse(archivedDate + 'T12:00:00Z')) / 86_400_000));
+    const daysLeft = Math.max(1, KANBAN_ARCHIVE_RETENTION_DAYS - elapsedArchiveDays);
     const meta = [
       card.subjectName,
       card.category,
-      `Ukończono: ${formatDate(card.completedAt || card.archivedAt)}`,
-      `W archiwum od: ${formatDate(card.archivedAt)}`,
+      `Ukończono: ${formatDate(card.completedAt || archivedDate)}`,
+      `W archiwum od: ${formatDate(archivedDate)}`,
+      `Usunięcie za ${daysLeft} ${daysLeft === 1 ? 'dzień' : 'dni'}`,
     ].filter(Boolean).join(' · ');
     info.append(node('div', 'archive-row-meta', meta));
 
@@ -2408,7 +2586,7 @@ function renderKanbanArchiveList() {
     actions.append(
       iconBtn('kanban-icon-btn', 'ph-eye', 'Zobacz szczegóły i notatki', () => openKanbanDetailsDialog(card.id)),
       iconBtn('kanban-icon-btn', 'ph-arrow-counter-clockwise', 'Przywróć do kolumny „Zrobione”', () => restoreKanbanCardFromArchive(card.id), 'Przywróć'),
-      iconBtn('danger kanban-icon-btn', 'ph-trash', 'Usuń trwale z archiwum', () => deleteArchivedKanbanCard(card.id)),
+      iconBtn('danger kanban-icon-btn', 'ph-trash', 'Usuń wcześniej z archiwum', () => deleteArchivedKanbanCard(card.id), 'Usuń'),
     );
     row.append(info, actions);
     list.append(row);

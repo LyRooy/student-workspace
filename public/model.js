@@ -56,6 +56,7 @@ export const DEFAULT_KANBAN_COLUMNS = [
   { id: 'done', title: 'Zrobione' },
 ];
 export const KANBAN_ARCHIVE_AFTER_DAYS = 7;
+export const KANBAN_ARCHIVE_RETENTION_DAYS = 30;
 
 export const emptyKanban = () => ({
   schemaVersion: SCHEMA_VERSION,
@@ -347,14 +348,17 @@ export function validateKanban(kanban) {
 }
 
 /**
- * Uzupełnia datę ukończenia (`completedAt`) dla zadań w kolumnie „Zrobione”
- * i automatycznie archiwizuje zadania starsze niż KANBAN_ARCHIVE_AFTER_DAYS dni.
+ * Uzupełnia datę ukończenia (`completedAt`) dla zadań w kolumnie „Zrobione”,
+ * automatycznie archiwizuje zadania starsze niż KANBAN_ARCHIVE_AFTER_DAYS dni
+ * oraz usuwa zadania z archiwum po upływie KANBAN_ARCHIVE_RETENTION_DAYS dni.
  */
 export function reconcileKanbanArchive(kanban, todayStr) {
   const doneColId = kanban.columns.length > 1 ? kanban.columns[kanban.columns.length - 1].id : null;
   let changed = false;
   let archivedCount = 0;
   let stampedCount = 0;
+  let deletedCount = 0;
+  const keptCards = [];
 
   for (const card of kanban.cards) {
     if (card.archivedAt === '') {
@@ -362,10 +366,16 @@ export function reconcileKanbanArchive(kanban, todayStr) {
       changed = true;
     }
     if (card.archivedAt) {
+      if (addDays(card.archivedAt, KANBAN_ARCHIVE_RETENTION_DAYS) <= todayStr) {
+        deletedCount++;
+        changed = true;
+        continue;
+      }
       if (!card.completedAt) {
         card.completedAt = card.archivedAt;
         changed = true;
       }
+      keptCards.push(card);
       continue;
     }
     if (doneColId && card.columnId === doneColId) {
@@ -382,6 +392,8 @@ export function reconcileKanbanArchive(kanban, todayStr) {
       delete card.completedAt;
       changed = true;
     }
+    keptCards.push(card);
   }
-  return { changed, archivedCount, stampedCount };
+  if (deletedCount > 0) kanban.cards = keptCards;
+  return { changed, archivedCount, stampedCount, deletedCount };
 }
