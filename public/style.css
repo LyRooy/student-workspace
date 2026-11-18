@@ -880,6 +880,8 @@ textarea { min-height: 70px; resize: vertical; }
 
 .kanban-card:hover { box-shadow: 0 5px 14px var(--shadow); }
 .kanban-card.dragging { opacity: 0.45; cursor: grabbing; }
+.kanban-card.drag-over-top { box-shadow: inset 0 3px 0 0 var(--accent); }
+.kanban-card.drag-over-bottom { box-shadow: inset 0 -3px 0 0 var(--accent); }
 .kanban-card.priority-high { border-left-color: var(--danger); }
 .kanban-card.priority-medium { border-left-color: var(--accent); }
 .kanban-card.priority-low { border-left-color: var(--today-border); }

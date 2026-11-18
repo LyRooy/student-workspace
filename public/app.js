@@ -1981,6 +1981,7 @@ function renderKanbanCard(card, colIndex, totalCols, isDoneCol) {
     draggedKanbanCardId = null;
     el.classList.remove('dragging');
     for (const colEl of document.querySelectorAll('.kanban-col.drag-over')) colEl.classList.remove('drag-over');
+    clearSubtaskDragClasses();
   });
   el.onclick = (e) => {
     if (window.getSelection?.()?.toString().trim() || e.target?.closest?.('a, button, input, label')) return;
@@ -2151,26 +2152,39 @@ function renderKanban() {
     colEl.append(head);
 
     const cardsContainer = node('div', 'kanban-cards');
+    const getCardDropTarget = (clientY) => {
+      const els = [...cardsContainer.querySelectorAll('.kanban-card:not(.dragging)')];
+      const idx = els.findIndex((cEl) => {
+        const r = cEl.getBoundingClientRect();
+        return clientY < r.top + r.height / 2;
+      });
+      return { els, idx };
+    };
     colEl.addEventListener('dragover', (e) => {
       if (!draggedKanbanCardId) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
       colEl.classList.add('drag-over');
+      clearSubtaskDragClasses();
+      const { els, idx } = getCardDropTarget(e.clientY);
+      if (idx >= 0) els[idx].classList.add('drag-over-top');
+      else if (els.length > 0) els[els.length - 1].classList.add('drag-over-bottom');
     });
-    colEl.addEventListener('dragleave', (e) => { if (!colEl.contains(e.relatedTarget)) colEl.classList.remove('drag-over'); });
+    colEl.addEventListener('dragleave', (e) => {
+      if (!colEl.contains(e.relatedTarget)) {
+        colEl.classList.remove('drag-over');
+        clearSubtaskDragClasses();
+      }
+    });
     colEl.addEventListener('drop', (e) => {
       if (!draggedKanbanCardId) return;
       e.preventDefault();
       colEl.classList.remove('drag-over');
+      clearSubtaskDragClasses();
       const cardId = draggedKanbanCardId || e.dataTransfer.getData('text/plain');
       if (!cardId) return;
-      const els = [...cardsContainer.querySelectorAll('.kanban-card:not(.dragging)')];
-      let targetIdx = els.findIndex((cEl) => {
-        const r = cEl.getBoundingClientRect();
-        return e.clientY < r.top + r.height / 2;
-      });
-      if (targetIdx < 0) targetIdx = els.length;
-      moveKanbanCardToColumn(cardId, col.id, targetIdx);
+      const { els, idx } = getCardDropTarget(e.clientY);
+      moveKanbanCardToColumn(cardId, col.id, idx < 0 ? els.length : idx);
     });
 
     if (!colCards.length) {
