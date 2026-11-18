@@ -288,7 +288,8 @@ button {
 
 button .ph { font-size: 16px; line-height: 1; }
 button:hover { background: var(--control-hover); }
-button:disabled { opacity: 0.45; cursor: wait; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:disabled:hover { background: var(--control); }
 button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
 .primary, #editModeToggle[aria-pressed="true"] { background: var(--green); color: var(--on-green); border-color: var(--green); }
