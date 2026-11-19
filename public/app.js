@@ -1733,33 +1733,52 @@ function renderMobileKanbanTabs(filteredCards) {
   });
 }
 
+function placeKanbanCardInColumn(kanban, card, targetColumnId, targetIndex = null) {
+  const doneColId = getDoneColumnId(kanban);
+  const wasDone = card.columnId === doneColId && !card.archivedAt;
+  card.columnId = targetColumnId;
+  delete card.archivedAt;
+  if (doneColId && targetColumnId === doneColId) {
+    if (!wasDone || !card.completedAt) card.completedAt = today();
+  } else {
+    delete card.completedAt;
+  }
+  const colCards = kanban.cards
+    .filter((c) => !c.archivedAt && c.columnId === targetColumnId && c.id !== card.id)
+    .sort((a, b) => a.order - b.order);
+  const insertAt = targetIndex === null ? colCards.length : Math.max(0, Math.min(colCards.length, targetIndex));
+  colCards.splice(insertAt, 0, card);
+  colCards.forEach((c, idx) => { c.order = idx; });
+}
+
 function moveKanbanCardToColumn(cardId, targetColumnId, targetIndex = null) {
   mutateKanban((kanban) => {
     const card = kanban.cards.find((c) => c.id === cardId);
-    if (!card) return;
-    const doneColId = getDoneColumnId(kanban);
-    const wasDone = card.columnId === doneColId && !card.archivedAt;
-    card.columnId = targetColumnId;
-    delete card.archivedAt;
-    if (doneColId && targetColumnId === doneColId) {
-      if (!wasDone || !card.completedAt) card.completedAt = today();
-    } else {
-      delete card.completedAt;
-    }
-    const colCards = kanban.cards
-      .filter((c) => !c.archivedAt && c.columnId === targetColumnId && c.id !== cardId)
-      .sort((a, b) => a.order - b.order);
-    const insertAt = targetIndex === null ? colCards.length : Math.max(0, Math.min(colCards.length, targetIndex));
-    colCards.splice(insertAt, 0, card);
-    colCards.forEach((c, idx) => { c.order = idx; });
+    if (card) placeKanbanCardInColumn(kanban, card, targetColumnId, targetIndex);
   });
 }
 
 function toggleKanbanChecklistItem(cardId, itemId) {
+  let movedToDoneTitle = null;
   mutateKanban((kanban) => {
-    const item = kanban.cards.find((c) => c.id === cardId)?.checklist?.find((i) => i.id === itemId);
-    if (item) item.done = !item.done;
+    const card = kanban.cards.find((c) => c.id === cardId);
+    const item = card?.checklist?.find((i) => i.id === itemId);
+    if (!item) return;
+    item.done = !item.done;
+    const doneColId = getDoneColumnId(kanban);
+    if (
+      item.done &&
+      doneColId &&
+      !card.archivedAt &&
+      card.columnId !== doneColId &&
+      card.checklist.length > 0 &&
+      card.checklist.every((i) => i.done)
+    ) {
+      placeKanbanCardInColumn(kanban, card, doneColId);
+      movedToDoneTitle = kanban.columns.find((c) => c.id === doneColId)?.title || 'Zrobione';
+    }
   });
+  if (movedToDoneTitle) setStatus(`Wszystkie podzadania ukończone — przeniesiono zadanie do kolumny „${movedToDoneTitle}”.`);
 }
 
 function moveKanbanChecklistItem(cardId, fromIndex, toIndex) {
